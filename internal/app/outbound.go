@@ -612,7 +612,7 @@ func (o *outbound) fire(ctx context.Context, key domain.Key, force, idleCompleti
 	var footer string
 	if !captured && (mode != domain.DoneScreen || wantMeta) {
 		r, err := o.replies.LastReply(ctx, agent)
-		if err == nil && hasTurn && !t.started.IsZero() && !r.Written.IsZero() && r.Written.Before(t.started) {
+		if err == nil && !freshReply(hasTurn, t.started, r) {
 			err = fmt.Errorf("%w: stale transcript: written %s before the turn started", domain.ErrNoReply, t.started.Sub(r.Written).Round(time.Second))
 		}
 		switch {
@@ -1292,10 +1292,27 @@ func (o *outbound) absorbEdit(key domain.Key, err error) error {
 // when lines is 0, else its last lines. Unlike Fire it ignores the mute
 // flag and the duplicate check because the operator asked for it. Errors
 // are returned so the caller can tell the operator.
+//
+// A bare /screen (lines == 0) on an agent at its prompt tries the reply
+// source first and posts the reply rendered from Markdown: some agents
+// (opencode) draw a multi-column TUI that comes out as scrambled text when
+// the screen is scraped row by row. /screen N stays a literal screen read on purpose: an
+// explicit line count asks for the terminal, e.g. a permission dialog or
+// tool output the reply source has no representation of.
 func (o *outbound) Screen(ctx context.Context, key domain.Key, lines int) error {
 	entry, ok := o.topics.Entry(key)
 	if !ok {
 		return fmt.Errorf("screen for %s: no topic", key)
+	}
+	if lines == 0 {
+		if text, ok := o.replyScreen(ctx, key); ok {
+			if _, err := o.tg.Send(ctx, domain.Outgoing{ThreadID: entry.ThreadID, Text: text, Markdown: true}); err != nil {
+				return err
+			}
+			o.log.Info("screen posted", slog.String("key", key.String()), slog.Int("thread_id", entry.ThreadID),
+				slog.String("status", "reply"), slog.Int("lines", strings.Count(text, "\n")+1), slog.Int("bytes", len(text)))
+			return nil
+		}
 	}
 	screen, err := o.herdr.ReadScreen(ctx, key.PaneID, domain.ScreenVisible, lines)
 	if err != nil {
@@ -1311,6 +1328,49 @@ func (o *outbound) Screen(ctx context.Context, key domain.Key, lines int) error 
 	o.log.Info("screen posted", slog.String("key", key.String()), slog.Int("thread_id", entry.ThreadID),
 		slog.String("status", "requested"), slog.Int("lines", strings.Count(text, "\n")+1), slog.Int("bytes", len(text)))
 	return nil
+}
+
+// replyScreen tries the agent's reply source for a bare /screen post. ok
+// is false whenever the screen should be scraped exactly as before: no
+// reply source, the agent is gone or not at its prompt (a working agent's
+// progress and a blocked agent's dialog exist only on the screen), the
+// source has nothing for it (ErrNoReply: unsupported kind, no session, no
+// text) or what it has predates the agent's current turn.
+func (o *outbound) replyScreen(ctx context.Context, key domain.Key) (string, bool) {
+	if o.replies == nil {
+		return "", false
+	}
+	agent, ok := o.agents(key)
+	if !ok || !agent.Status.ReadyForInput() {
+		return "", false
+	}
+	r, err := o.replies.LastReply(ctx, agent)
+	if err != nil {
+		o.log.Debug("screen reply unavailable", slog.String("key", key.String()), slog.Any("err", err))
+		return "", false
+	}
+	t, hasTurn := o.turns[key]
+	if !freshReply(hasTurn, t.started, r) {
+		o.log.Debug("screen reply stale", slog.String("key", key.String()),
+			slog.Time("written", r.Written), slog.Time("turn_started", t.started))
+		return "", false
+	}
+	text := strings.TrimSpace(r.Text)
+	if text == "" {
+		return "", false
+	}
+	return text, true
+}
+
+// freshReply reports whether r belongs to the current turn. No known turn
+// start or no known write time leaves nothing to compare, so it counts as
+// fresh; a reply written before the turn started belongs to an earlier
+// turn and is stale.
+func freshReply(hasTurn bool, turnStarted time.Time, r domain.Reply) bool {
+	if !hasTurn || turnStarted.IsZero() || r.Written.IsZero() {
+		return true
+	}
+	return !r.Written.Before(turnStarted)
 }
 
 // ScreenAll posts what the agent printed since the last human message: the

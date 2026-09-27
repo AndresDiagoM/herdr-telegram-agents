@@ -1,0 +1,23 @@
+package domain
+
+import "context"
+
+// MultiReplySource tries each source in order and returns the first reply
+// that isn't ErrNoReply. Every source is expected to reject agent kinds it
+// doesn't understand with ErrNoReply, so this never needs to dispatch by
+// kind itself; order among sources that could both answer does not matter
+// in practice because no two sources currently claim the same kind.
+type MultiReplySource []ReplySource
+
+// LastReply implements ReplySource.
+func (m MultiReplySource) LastReply(ctx context.Context, agent Agent) (Reply, error) {
+	lastErr := error(ErrNoReply)
+	for _, s := range m {
+		r, err := s.LastReply(ctx, agent)
+		if err == nil {
+			return r, nil
+		}
+		lastErr = err
+	}
+	return Reply{}, lastErr
+}

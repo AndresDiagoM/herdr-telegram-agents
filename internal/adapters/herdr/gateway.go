@@ -167,6 +167,29 @@ func (g *Gateway) ListAgents(ctx context.Context) ([]domain.Agent, error) {
 	return agents, nil
 }
 
+// AgentSession returns the complete agent_session tuple Herdr reports for
+// paneID, or a zero tuple when the pane is gone or has none. The tuple is
+// transient: a reply source uses its value for one lookup and never stores
+// it (see domain.SessionTuple).
+func (g *Gateway) AgentSession(ctx context.Context, paneID string) (domain.SessionTuple, error) {
+	var res agentListResult
+	if err := g.call(ctx, "agent.list", "", nil, &res); err != nil {
+		return domain.SessionTuple{}, err
+	}
+	for _, a := range res.Agents {
+		if a.PaneID != paneID || a.AgentSession == nil {
+			continue
+		}
+		return domain.SessionTuple{
+			Source: a.AgentSession.Source,
+			Agent:  a.AgentSession.Agent,
+			Kind:   a.AgentSession.Kind,
+			Value:  a.AgentSession.Value,
+		}, nil
+	}
+	return domain.SessionTuple{}, nil
+}
+
 // ReadScreen returns plain text from the agent's terminal.
 func (g *Gateway) ReadScreen(ctx context.Context, target string, source domain.ScreenSource, lines int) (domain.Screen, error) {
 	var res paneReadResult

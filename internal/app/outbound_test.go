@@ -343,6 +343,127 @@ func TestOutboundScreenOnRequest(t *testing.T) {
 	}
 }
 
+// TestOutboundScreenPrefersFreshReply covers a bare /screen on an agent at
+// its prompt with a reply source that has something fresh: the reply is
+// posted rendered from Markdown and the screen is never read, so an agent
+// whose TUI scrapes into scrambled text (opencode) gets a clean post.
+func TestOutboundScreenPrefersFreshReply(t *testing.T) {
+	for _, st := range []domain.Status{domain.StatusIdle, domain.StatusDone} {
+		f := newBridgeFixture(t)
+		a := f.add(t, "p1", "t1", "a", st)
+		f.herdr.SetScreen("p1", "raw multi-column screen")
+		f.replies.Set(a.Key, "Endpoint is **live** now.")
+		if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+			t.Fatal(err)
+		}
+		sent := f.tg.Sent()
+		if len(sent) != 1 || sent[0].Text != "Endpoint is **live** now." || sent[0].Code || !sent[0].Markdown {
+			t.Fatalf("%s: Sent = %+v", st, sent)
+		}
+		if reads := f.herdr.Reads(); len(reads) != 0 {
+			t.Fatalf("%s: screen read although the reply was posted: %+v", st, reads)
+		}
+		if !strings.Contains(f.logBuf.String(), `"msg":"screen posted"`) || !strings.Contains(f.logBuf.String(), `"status":"reply"`) {
+			t.Errorf("%s: log = %s", st, f.logBuf.String())
+		}
+	}
+}
+
+// TestOutboundScreenBusyAgentGetsScreen covers a working or blocked agent:
+// its progress or its dialog exists only on the screen, so a bare /screen
+// reads the screen without asking the reply source.
+func TestOutboundScreenBusyAgentGetsScreen(t *testing.T) {
+	for _, st := range []domain.Status{domain.StatusWorking, domain.StatusBlocked} {
+		f := newBridgeFixture(t)
+		a := f.add(t, "p1", "t1", "a", st)
+		f.herdr.SetScreen("p1", "Allow edit? 1. Yes 2. No")
+		f.replies.Set(a.Key, "an older reply")
+		if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+			t.Fatal(err)
+		}
+		if calls := f.replies.Calls(); len(calls) != 0 {
+			t.Fatalf("%s: reply source consulted: %v", st, calls)
+		}
+		if sent := f.tg.Sent(); len(sent) != 1 || sent[0].Text != "Allow edit? 1. Yes 2. No" || !sent[0].Code {
+			t.Fatalf("%s: Sent = %+v", st, sent)
+		}
+	}
+}
+
+// TestOutboundScreenFallsBackWhenReplyStale covers a reply written before
+// the agent's current turn started (e.g. two panes in one directory): the
+// screen is posted instead of the outdated reply.
+func TestOutboundScreenFallsBackWhenReplyStale(t *testing.T) {
+	f := newBridgeFixture(t)
+	a := f.add(t, "p1", "t1", "a", domain.StatusWorking)
+	f.out.Observe(AgentEvent{Kind: AgentChanged, Agent: a})
+	f.out.Observe(AgentEvent{Kind: AgentChanged, Agent: f.setStatus(a, domain.StatusIdle)})
+	f.herdr.SetScreen("p1", "raw screen text")
+	f.replies.Set(a.Key, "stale reply text")
+	f.replies.SetMeta(a.Key, domain.TurnMeta{}, f.clock.Now().Add(-time.Minute))
+	if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.replies.Calls(); len(calls) != 1 {
+		t.Fatalf("reply source calls = %v, want one", calls)
+	}
+	if sent := f.tg.Sent(); len(sent) != 1 || sent[0].Text != "raw screen text" || !sent[0].Code {
+		t.Fatalf("Sent = %+v", sent)
+	}
+}
+
+// TestOutboundScreenFallsBackWhenNoReply covers ErrNoReply (unsupported
+// kind, no session, no text): the screen is posted exactly as before the
+// reply source existed.
+func TestOutboundScreenFallsBackWhenNoReply(t *testing.T) {
+	f := newBridgeFixture(t)
+	a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
+	f.herdr.SetScreen("p1", "raw screen text")
+	if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.replies.Calls(); len(calls) != 1 {
+		t.Fatalf("reply source calls = %v, want one", calls)
+	}
+	if sent := f.tg.Sent(); len(sent) != 1 || sent[0].Text != "raw screen text" || !sent[0].Code {
+		t.Fatalf("Sent = %+v", sent)
+	}
+}
+
+// TestOutboundScreenWithLinesSkipsReplySource covers /screen N: an
+// explicit line count always reads the literal screen and never consults
+// the reply source, even when one has something to say.
+func TestOutboundScreenWithLinesSkipsReplySource(t *testing.T) {
+	f := newBridgeFixture(t)
+	a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
+	f.herdr.SetScreen("p1", "raw screen text")
+	f.replies.Set(a.Key, "should not be used")
+	if err := f.out.Screen(f.ctx, a.Key, 10); err != nil {
+		t.Fatal(err)
+	}
+	if calls := f.replies.Calls(); len(calls) != 0 {
+		t.Fatalf("reply source consulted for /screen N: %v", calls)
+	}
+	if sent := f.tg.Sent(); len(sent) != 1 || sent[0].Text != "raw screen text" || !sent[0].Code {
+		t.Fatalf("Sent = %+v", sent)
+	}
+}
+
+// TestOutboundScreenNilReplySourceUsesScreen covers the daemon wired with
+// no reply source: a bare /screen behaves as it always did.
+func TestOutboundScreenNilReplySourceUsesScreen(t *testing.T) {
+	f := newBridgeFixture(t)
+	f.out.replies = nil
+	a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
+	f.herdr.SetScreen("p1", "raw screen text")
+	if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+		t.Fatal(err)
+	}
+	if sent := f.tg.Sent(); len(sent) != 1 || sent[0].Text != "raw screen text" || !sent[0].Code {
+		t.Fatalf("Sent = %+v", sent)
+	}
+}
+
 func TestTrimScreen(t *testing.T) {
 	tests := []struct{ in, want string }{
 		{"", ""},

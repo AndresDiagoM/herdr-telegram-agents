@@ -17,7 +17,7 @@ import (
 
 // helpText is the command list shown by /help in a topic and in General.
 const helpText = `Commands
-/screen [N|all]: post the agent screen: the whole visible screen, its last N lines, or with "all" everything since your last message
+/screen [N|all]: post the agent's last reply when it is idle or done and the reply can be read, else the whole visible screen; with N the screen's last N lines, with "all" everything since your last message
 /keys k1 k2 ...: send raw keys to the agent (esc, enter, y, 1 ...)
 /focus: bring the agent's pane to the front in Herdr
 /git status | diff [staged] | log [N]: git in the agent's directory; long output arrives as a file
