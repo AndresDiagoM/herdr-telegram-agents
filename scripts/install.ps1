@@ -15,7 +15,7 @@ $repo = "permgps/herdr-telegram-agents"
 function Get-Sha256Hex([string]$Path) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path).ProviderPath)
+        $stream = [System.IO.File]::OpenRead((Resolve-Path -LiteralPath $Path -ErrorAction Stop).ProviderPath)
         try {
             return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
         } finally {
