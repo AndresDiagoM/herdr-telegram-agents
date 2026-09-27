@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	// openCodeExportTimeout bounds one "opencode export" run; a real run
-	// takes about 1.5 s, mostly runtime startup.
+	// openCodeExportTimeout bounds the export attempts together.
 	openCodeExportTimeout = 10 * time.Second
 	// openCodeExportMaxOutput caps the JSON a run may produce. A session
 	// export is a few MB in normal use, and truncated JSON cannot be parsed,
@@ -24,10 +23,9 @@ const (
 	openCodeWaitDelay = time.Second
 )
 
-// OpenCodeExporter runs "opencode export <sessionID>" from the opencode
-// binary on PATH and returns its JSON. The argv is fixed: the only input is
-// the session id Herdr reported for the pane, passed as one argument and
-// never through a shell.
+// OpenCodeExporter runs OpenCode's session export command from the binary on
+// PATH and returns its JSON. The session id Herdr reported for the pane is
+// passed as one argument, never through a shell.
 type OpenCodeExporter struct {
 	bin      string
 	timeout  time.Duration
@@ -57,21 +55,37 @@ func (e *OpenCodeExporter) Export(ctx context.Context, sessionID string) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("opencode export: binary not found")
 	}
-	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	parentCtx := ctx
+	childCtx, cancel := context.WithTimeout(parentCtx, e.timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, "export", sessionID)
-	cmd.WaitDelay = openCodeWaitDelay
-	stdout := &limitedWriter{max: e.maxBytes}
-	cmd.Stdout, cmd.Stderr = stdout, io.Discard
 	start := time.Now()
 	run := e.run
 	if run == nil {
 		run = (*exec.Cmd).Run
 	}
-	runErr := run(cmd)
+	runExport := func(args ...string) (*limitedWriter, error) {
+		cmd := exec.CommandContext(childCtx, bin, args...)
+		cmd.WaitDelay = openCodeWaitDelay
+		stdout := &limitedWriter{max: e.maxBytes}
+		cmd.Stdout, cmd.Stderr = stdout, io.Discard
+		return stdout, run(cmd)
+	}
+	stdout, runErr := runExport("session", "export", sessionID)
+	// OpenCode 1.x used "opencode export". Confirm the major version
+	// before trying it: a failed 2.x export can mean an unavailable session,
+	// and "opencode export" on 2.x can open its interactive UI.
+	var firstExit *exec.ExitError
+	if errors.As(runErr, &firstExit) && childCtx.Err() == nil && !stdout.capped {
+		versionOut, versionErr := runExport("--version")
+		if versionErr == nil && !versionOut.capped && openCodeV1Version(versionOut.buf.String()) {
+			stdout, runErr = runExport("export", sessionID)
+		}
+	}
 	category := "ok"
-	if ctx.Err() != nil {
-		category = "context"
+	if parentCtx.Err() != nil {
+		category = "parent_context"
+	} else if childCtx.Err() != nil {
+		category = "export_timeout"
 	} else if stdout.capped {
 		category = "output_cap"
 	} else if runErr != nil {
@@ -89,8 +103,10 @@ func (e *OpenCodeExporter) Export(ctx context.Context, sessionID string) ([]byte
 		slog.Int("bytes", stdout.buf.Len()), slog.Bool("capped", stdout.capped),
 		slog.String("category", category), slog.Int("exit_code", exitCode))
 	switch {
-	case ctx.Err() != nil:
-		return nil, fmt.Errorf("opencode export: %w", ctx.Err())
+	case parentCtx.Err() != nil:
+		return nil, fmt.Errorf("opencode export: %w", parentCtx.Err())
+	case childCtx.Err() != nil:
+		return nil, errors.New("opencode export: timed out")
 	case runErr == nil && !stdout.capped:
 		return stdout.buf.Bytes(), nil
 	case stdout.capped:
@@ -100,4 +116,13 @@ func (e *OpenCodeExporter) Export(ctx context.Context, sessionID string) ([]byte
 		return nil, fmt.Errorf("opencode export: exit code %d", exitCode)
 	}
 	return nil, fmt.Errorf("opencode export: start or wait failed")
+}
+
+func openCodeV1Version(version string) bool {
+	for _, field := range strings.Fields(version) {
+		if strings.HasPrefix(strings.TrimPrefix(field, "v"), "1.") {
+			return true
+		}
+	}
+	return false
 }

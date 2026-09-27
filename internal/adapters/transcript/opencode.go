@@ -21,8 +21,8 @@ var openCodeEditTools = map[string]bool{"edit": true, "write": true}
 
 // OpenCodeReader implements domain.ReplySource for opencode. opencode
 // keeps its sessions in a private SQLite database rather than a file per
-// session, so the reader asks opencode itself ("opencode export <id>",
-// run by the export function) for the session Herdr reports for the pane.
+// session, so the reader asks its session export CLI through the injected
+// export function for the session Herdr reports for the pane.
 // The session tuple comes from Herdr at read time and is used for that
 // one lookup only: it is never stored or logged (see domain.SessionTuple),
 // and a tuple whose digest differs from the topic's key means the pane now
@@ -120,6 +120,18 @@ type openCodeExport struct {
 }
 
 type openCodeMessage struct {
+	Type    string         `json:"type"`
+	Content []openCodePart `json:"content"`
+	Model   struct {
+		ID string `json:"id"`
+	} `json:"model"`
+	Time struct {
+		Created   int64 `json:"created"`
+		Completed int64 `json:"completed"`
+	} `json:"time"`
+	Tokens struct {
+		Output int `json:"output"`
+	} `json:"tokens"`
 	Info struct {
 		Role    string `json:"role"`
 		ModelID string `json:"modelID"`
@@ -158,30 +170,30 @@ type openCodePart struct {
 // edited, in the order first met.
 func openCodeLastReply(messages []openCodeMessage) (string, domain.TurnMeta, error) {
 	start := len(messages)
-	for start > 0 && messages[start-1].Info.Role != "user" {
+	for start > 0 && messages[start-1].role() != "user" {
 		start--
 	}
 	if start == 0 {
 		return "", domain.TurnMeta{}, fmt.Errorf("%w: no user prompt in export", domain.ErrNoReply)
 	}
 	var meta domain.TurnMeta
-	meta.Started = unixMilli(messages[start-1].Info.Time.Created)
+	meta.Started = unixMilli(messages[start-1].created())
 	var texts []string
 	seen := map[string]bool{}
 	for _, m := range messages[start:] {
-		if m.Info.Role != "assistant" {
+		if m.role() != "assistant" {
 			continue
 		}
-		meta.OutputTokens += m.Info.Tokens.Output
-		if m.Info.ModelID != "" {
-			meta.Model = m.Info.ModelID
+		meta.OutputTokens += m.outputTokens()
+		if model := m.modelID(); model != "" {
+			meta.Model = model
 		}
-		if t := unixMilli(m.Info.Time.Completed); !t.IsZero() {
+		if t := unixMilli(m.completed()); !t.IsZero() {
 			meta.Ended = t
-		} else if t := unixMilli(m.Info.Time.Created); !t.IsZero() {
+		} else if t := unixMilli(m.created()); !t.IsZero() {
 			meta.Ended = t
 		}
-		for _, p := range m.Parts {
+		for _, p := range m.parts() {
 			switch {
 			case p.Type == "text":
 				if t := strings.TrimSpace(p.Text); t != "" {
@@ -197,6 +209,48 @@ func openCodeLastReply(messages []openCodeMessage) (string, domain.TurnMeta, err
 		return "", domain.TurnMeta{}, fmt.Errorf("%w: no text after the last prompt", domain.ErrNoReply)
 	}
 	return strings.Join(texts, "\n\n"), meta, nil
+}
+
+func (m openCodeMessage) role() string {
+	if m.Type != "" {
+		return m.Type
+	}
+	return m.Info.Role
+}
+
+func (m openCodeMessage) parts() []openCodePart {
+	if m.Type != "" {
+		return m.Content
+	}
+	return m.Parts
+}
+
+func (m openCodeMessage) modelID() string {
+	if m.Type != "" {
+		return m.Model.ID
+	}
+	return m.Info.ModelID
+}
+
+func (m openCodeMessage) created() int64 {
+	if m.Type != "" {
+		return m.Time.Created
+	}
+	return m.Info.Time.Created
+}
+
+func (m openCodeMessage) completed() int64 {
+	if m.Type != "" {
+		return m.Time.Completed
+	}
+	return m.Info.Time.Completed
+}
+
+func (m openCodeMessage) outputTokens() int {
+	if m.Type != "" {
+		return m.Tokens.Output
+	}
+	return m.Info.Tokens.Output
 }
 
 // unixMilli converts opencode's millisecond timestamps; zero stays zero.

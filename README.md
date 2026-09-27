@@ -47,6 +47,10 @@ allow-listed repository information. Photos, documents, voice notes, audio,
 and video sent to a topic are saved in the plugin inbox and passed to the
 agent as file paths.
 
+For readable OpenCode replies, run `herdr integration install opencode` and
+make sure the `opencode` executable is on the plugin daemon's `PATH`. Without
+an exact session reference, `/screen` falls back to the visible terminal.
+
 In General, `/status` shows all agents, `/new` starts one, and `/options`
 opens the settings panel. The panel controls syncing, notification behavior,
 icons, redaction, and cleanup. The pinned dashboard shows the same agent

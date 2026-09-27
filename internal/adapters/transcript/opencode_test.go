@@ -102,6 +102,23 @@ func TestOpenCodeLastReply(t *testing.T) {
 	}
 }
 
+func TestOpenCodeLastReplyV2Export(t *testing.T) {
+	const exported = `{"info":{"id":"ses_abc"},"messages":[
+		{"type":"user","time":{"created":1000},"text":"current prompt"},
+		{"type":"assistant","time":{"created":1001,"completed":2000},"model":{"id":"model-v2"},
+		 "tokens":{"output":12},"content":[{"type":"reasoning","text":"private"},{"type":"text","text":"Ready **now**."}]},
+		{"type":"idle","time":{"created":2001}}]}`
+	f := &openCodeFixture{tuple: openCodeTuple, out: exported}
+	reply, err := f.reader().LastReply(context.Background(), openCodeAgent(openCodeTuple.Digest()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply.Text != "Ready **now**." || reply.Meta.Model != "model-v2" || reply.Meta.OutputTokens != 12 ||
+		!reply.Meta.Started.Equal(time.UnixMilli(1000)) || !reply.Written.Equal(time.UnixMilli(2000)) {
+		t.Fatalf("v2 reply = %+v", reply)
+	}
+}
+
 // A mapping entry without a session digest cannot prove the pane identity.
 func TestOpenCodeLastReplySessionlessKey(t *testing.T) {
 	f := &openCodeFixture{tuple: openCodeTuple, out: openCodeTurn}
@@ -198,6 +215,20 @@ func TestOpenCodeLastReplyContextErrors(t *testing.T) {
 		if _, err := f.reader().LastReply(context.Background(), openCodeAgent(openCodeTuple.Digest())); !errors.Is(err, cause) {
 			t.Fatalf("export = %v, want %v", err, cause)
 		}
+	}
+}
+
+func TestOpenCodeLastReplyExporterTimeoutIsUnavailable(t *testing.T) {
+	f := &openCodeFixture{tuple: openCodeTuple, exportFn: func(string) ([]byte, error) {
+		return nil, errors.New("opencode export: timed out")
+	}}
+	parent := context.Background()
+	_, err := f.reader().LastReply(parent, openCodeAgent(openCodeTuple.Digest()))
+	if !errors.Is(err, domain.ErrNoReply) || errors.Is(err, context.DeadlineExceeded) || parent.Err() != nil {
+		t.Fatalf("export timeout = %v; parent = %v", err, parent.Err())
+	}
+	if strings.Contains(err.Error(), "ses_abc") || strings.Contains(f.logBuf.String(), "ses_abc") {
+		t.Fatalf("session leaked: %v", err)
 	}
 }
 
