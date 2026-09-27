@@ -8,6 +8,21 @@ Set-Location (Join-Path $PSScriptRoot "..")
 
 $repo = "permgps/herdr-telegram-agents"
 
+# Get-FileHash is a script function that Windows PowerShell 5.1 autoloads
+# from its Utility module. When Herdr was started from PowerShell 7, this
+# process inherits pwsh's module paths first and cannot load it, so hash
+# through .NET, which needs no module.
+function Get-Sha256Hex([string]$Path) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $stream = [System.IO.File]::OpenRead((Resolve-Path $Path).ProviderPath)
+    try {
+        return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+}
+
 $match = Select-String -Path herdr-plugin.toml -Pattern '^version\s*=\s*"(.*)"' | Select-Object -First 1
 if (-not $match) { throw "install: no version in herdr-plugin.toml" }
 $version = $match.Matches[0].Groups[1].Value
@@ -34,7 +49,7 @@ try {
     $line = Select-String -Path $sums -Pattern "\s$([regex]::Escape($asset))$" | Select-Object -First 1
     if (-not $line) { throw "install: $asset is missing from checksums.txt" }
     $expected = ($line.Line -split '\s+')[0].ToLower()
-    $actual = (Get-FileHash -Algorithm SHA256 $tmp).Hash.ToLower()
+    $actual = Get-Sha256Hex $tmp
     if ($expected -ne $actual) {
         throw "install: checksum mismatch for $asset (expected $expected, got $actual)"
     }
