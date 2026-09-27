@@ -14,11 +14,14 @@ $repo = "permgps/herdr-telegram-agents"
 # through .NET, which needs no module.
 function Get-Sha256Hex([string]$Path) {
     $sha = [System.Security.Cryptography.SHA256]::Create()
-    $stream = [System.IO.File]::OpenRead((Resolve-Path $Path).ProviderPath)
     try {
-        return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
+        $stream = [System.IO.File]::OpenRead((Resolve-Path $Path).ProviderPath)
+        try {
+            return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLower()
+        } finally {
+            $stream.Dispose()
+        }
     } finally {
-        $stream.Dispose()
         $sha.Dispose()
     }
 }
