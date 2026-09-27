@@ -18,8 +18,8 @@ answer in the topic. See [Silence the group](behaviour.md#silence-the-group)
 for why. When it turns **done** the topic gets the last 12 lines of the
 screen, or the agent's last reply when `Done post` in `/options` says so (see
 [Done posts](behaviour.md#done-posts)); under it, one line with the turn's
-duration, model, edited files and output tokens from the Claude Code
-transcript (`Turn summary line`), and a reply longer than `Fold long replies
+duration, model, edited files and output tokens from the Claude Code transcript
+or the exact OpenCode session (`Turn summary line`), and a reply longer than `Fold long replies
 after` arrives collapsed behind an arrow. Every screen post ends on the agent's
 last line: Claude Code's input frame at the bottom (the `─` rules with the
 empty `❯` row, the status line and the mode hint) is cut while `Trim the
@@ -59,7 +59,8 @@ Anything you write in a topic reaches the agent:
 | plain text | typed as a prompt and submitted (`agent.prompt`) |
 | `y`, `n`, `yes`, `no`, `1`..`9`, `enter`, `ok`, `esc` while the agent is blocked | the matching key (`agent.send_keys`); in any other status these are prompts. Pressing a button under the question sends its number the same way |
 | `/keys esc enter` | raw key names |
-| `/screen` or `/screen 40` | the visible screen, or its last 40 lines (max 200); the input frame is cut afterwards, so an idle Claude Code pane may answer with fewer than 40 lines |
+| `/screen` | for idle or done OpenCode, the current session's last reply rendered with bold, lists, links, and code blocks, up to five messages; if unavailable, the visible screen. Claude Code and other agents always show the visible screen. Working and blocked agents show their progress or dialog from the screen |
+| `/screen 40` | the visible screen's last 40 lines (max 200), never the reply; the input frame is cut afterwards, so an idle Claude Code pane may answer with fewer than 40 lines |
 | `/screen all` | everything the agent printed since your last message (typed in Herdr or sent here); long output arrives as a `.txt` file |
 | `/focus` | the pane is brought to the front in Herdr |
 | `/git status`, `/git diff`, `/git diff staged`, `/git log [N]` | `git status --short --branch`, `git diff HEAD`, `git diff --cached` or `git log --oneline --decorate -n N` (default 10, at most 50) run by the daemon in the agent's working directory (`cwd` from `agent.list`), colour and pager off, 10 s timeout. Up to 3600 characters come back as a quoted code block; longer output as a `<repo>-<sub>-<hhmmss>.patch` (diff) or `.txt` file with a caption naming the argv and the line count (5 MB cap, `truncated` when cut). Empty output answers `clean`, `no changes` or `no commits`. Anything else after `/git` (a path, a flag, another subcommand) answers `usage: /git status \| diff [staged] \| log [N]`; nothing typed on the phone reaches git. Failures: `⚠️ not a git repository: <cwd>`, `⚠️ git is not installed`, `⚠️ git timed out`, `⚠️ Herdr reports no working directory`. Secret redaction applies to the output like to any post |

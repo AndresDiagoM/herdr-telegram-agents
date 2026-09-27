@@ -147,6 +147,30 @@ func TestGatewayListAgents(t *testing.T) {
 	}
 }
 
+func TestGatewayAgentSession(t *testing.T) {
+	s := testkit.NewNDJSONServer(t, nil)
+	s.Handle("agent.list", func(id string, params json.RawMessage) (any, *testkit.APIError) {
+		return json.RawMessage(`{"type":"agent_list","agents":[
+			{"agent":"claude","agent_status":"idle","pane_id":"p1","terminal_id":"term-1"},
+			{"agent":"opencode","agent_status":"idle","pane_id":"p2","terminal_id":"term-2","agent_session":{"source":"herdr:opencode","agent":"opencode","kind":"id","value":"ses_abc"}}]}`), nil
+	})
+	g := newGateway(t, s)
+
+	got, err := g.AgentSession(ctxT(t), "p2")
+	if err != nil {
+		t.Fatalf("AgentSession: %v", err)
+	}
+	want := domain.SessionTuple{Source: "herdr:opencode", Agent: "opencode", Kind: "id", Value: "ses_abc"}
+	if got != want {
+		t.Fatalf("AgentSession(p2) = %+v, want %+v", got, want)
+	}
+	for _, pane := range []string{"p1", "gone"} {
+		if got, err := g.AgentSession(ctxT(t), pane); err != nil || got != (domain.SessionTuple{}) {
+			t.Fatalf("AgentSession(%s) = %+v, %v; want a zero tuple", pane, got, err)
+		}
+	}
+}
+
 func TestGatewayListAgentsPreservesSessionDigest(t *testing.T) {
 	s := testkit.NewNDJSONServer(t, nil)
 	s.Handle("agent.list", func(id string, params json.RawMessage) (any, *testkit.APIError) {

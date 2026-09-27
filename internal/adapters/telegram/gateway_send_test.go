@@ -523,6 +523,28 @@ func TestSendMaxPartsTrailer(t *testing.T) {
 	}
 }
 
+func TestSendMarkdownMaxPartsTrailer(t *testing.T) {
+	h := newHarness(t)
+	n := 0
+	h.api.on("sendMessage", func(url.Values) apiReply {
+		n++
+		return okReply(map[string]any{"message_id": n})
+	})
+	text := "```go\n" + strings.Repeat("🌍 line\n", 20000) + "```"
+	_, err := h.gw.Send(h.ctx, domain.Outgoing{ThreadID: 42, Text: text, Markdown: true, MaxParts: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := h.api.callsOf("sendMessage")
+	if len(calls) == 0 || len(calls) > 5 {
+		t.Fatalf("calls = %d, want 1..5", len(calls))
+	}
+	last := calls[len(calls)-1].form.Get("text")
+	if !strings.Contains(last, "chars)") || !strings.Contains(last, "</code></pre>") {
+		t.Fatalf("missing truncation trailer or closing fence: %.100q", last)
+	}
+}
+
 func TestSendMarkdownFenceAcrossParts(t *testing.T) {
 	h := newHarness(t)
 	n := 0

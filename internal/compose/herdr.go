@@ -18,6 +18,9 @@ type HerdrGateway interface {
 	Start(ctx context.Context) error
 	// Close stops the stream and drops the connections.
 	Close() error
+	// AgentSession returns the transient session tuple Herdr reports for a
+	// pane, for a reply source that needs the value for one lookup.
+	AgentSession(ctx context.Context, paneID string) (domain.SessionTuple, error)
 }
 
 // NewHerdrGateway builds the Herdr adapter for the socket at path with the
