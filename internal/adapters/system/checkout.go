@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -71,7 +70,7 @@ func expectedOrigin(raw string) bool {
 func checkoutGit(ctx context.Context, root string, args ...string) (string, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(callCtx, "git", args...)
+	cmd := command(callCtx, "git", args...)
 	cmd.Dir = root
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat", "LC_ALL=C")
 	var stdout, stderr bytes.Buffer

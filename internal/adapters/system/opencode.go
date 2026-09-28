@@ -64,7 +64,7 @@ func (e *OpenCodeExporter) Export(ctx context.Context, sessionID string) ([]byte
 		run = (*exec.Cmd).Run
 	}
 	runExport := func(args ...string) (*limitedWriter, error) {
-		cmd := exec.CommandContext(childCtx, bin, args...)
+		cmd := command(childCtx, bin, args...)
 		cmd.WaitDelay = openCodeWaitDelay
 		stdout := &limitedWriter{max: e.maxBytes}
 		cmd.Stdout, cmd.Stderr = stdout, io.Discard

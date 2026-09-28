@@ -59,7 +59,7 @@ func (r *GitRunner) Run(ctx context.Context, dir string, args []string) (domain.
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	argv := append([]string{"-c", "color.ui=never"}, args...)
-	cmd := exec.CommandContext(ctx, bin, argv...)
+	cmd := command(ctx, bin, argv...)
 	cmd.Dir = dir
 	cmd.WaitDelay = gitWaitDelay
 	cmd.Env = append(os.Environ(), "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
