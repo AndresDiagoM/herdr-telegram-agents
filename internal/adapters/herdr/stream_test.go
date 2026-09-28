@@ -381,6 +381,12 @@ func TestStreamSetPanesKeepsInFlightEvents(t *testing.T) {
 	const rounds, perRound = 12, 3
 	want, got := 0, 0
 	for r := 0; r < rounds; r++ {
+		// Receiving the previous batch does not mean SetPanes was handled:
+		// the old connection can still be the only one. Wait for the new
+		// subscribe request before waiting for the old connection to close.
+		if requests := s.WaitRequests("events.subscribe", r+1, time.Second); len(requests) != r+1 {
+			t.Fatalf("round %d: subscriptions = %d, want %d", r, len(requests), r+1)
+		}
 		if !s.WaitConns(1, time.Second) {
 			t.Fatalf("round %d: conns = %d", r, s.ConnCount())
 		}
@@ -397,6 +403,9 @@ func TestStreamSetPanesKeepsInFlightEvents(t *testing.T) {
 			select {
 			case ev := <-out:
 				if he, ok := ev.(domain.HerdrEvent); ok && he.Kind == domain.TabRenamed {
+					if expected := fmt.Sprintf("t%d-%d", got/perRound, got%perRound); he.TabID != expected {
+						t.Fatalf("round %d: event %q, want %q", r, he.TabID, expected)
+					}
 					got++
 				} else {
 					t.Fatalf("round %d: unexpected event %+v", r, ev)
