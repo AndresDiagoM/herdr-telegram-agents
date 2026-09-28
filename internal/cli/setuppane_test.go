@@ -19,8 +19,8 @@ func TestConsoleUI(t *testing.T) {
 	if got, err := ui.AskSecret("Token:"); err != nil || got != "123:abc" {
 		t.Fatalf("AskSecret = %q, %v", got, err)
 	}
-	if !strings.Contains(out.String(), "visible while you type") {
-		t.Fatalf("no visibility warning: %q", out.String())
+	if strings.Contains(out.String(), "123:abc") {
+		t.Fatalf("secret echoed: %q", out.String())
 	}
 	if ok, err := ui.Confirm("Save? [y/N]"); err != nil || !ok {
 		t.Fatalf("Confirm(Y) = %v, %v", ok, err)
@@ -109,5 +109,22 @@ func TestSetupPaneCancelledAndFailed(t *testing.T) {
 	code, stdout, _ = runCLI(t, "setup-pane")
 	if code != exitError || !strings.Contains(stdout, "Setup failed: token rejected 3 times") {
 		t.Fatalf("failed: exit = %d, stdout = %q", code, stdout)
+	}
+}
+
+func TestConsoleSecretUsesHiddenReader(t *testing.T) {
+	var out bytes.Buffer
+	ui := newConsoleUI(strings.NewReader("fallback\n"), &out, nil)
+	ui.readSecret = func() ([]byte, error) { return []byte("  private-token  "), nil }
+	got, err := ui.AskSecret("Token:")
+	if err != nil || got != "private-token" || strings.Contains(out.String(), got) {
+		t.Fatalf("hidden input: value %q, error %v, output %q", got, err, out.String())
+	}
+	ui.readSecret = func() ([]byte, error) { return nil, errors.New("terminal failure") }
+	if _, err := ui.AskSecret("Token:"); err == nil {
+		t.Fatal("terminal failure fell back to visible input")
+	}
+	if got, err := ui.Ask("Next:"); err != nil || got != "fallback" {
+		t.Fatalf("failure consumed fallback input: %q, %v", got, err)
 	}
 }

@@ -29,7 +29,7 @@ Go toolchain on the machine where it is installed.
 
 1. Create a bot with @BotFather and a supergroup with Topics enabled.
 2. In a Herdr pane, run `herdr plugin action invoke permgps.telegram-agents.setup`.
-3. Enter the token in the popup, open its bot link, press **Start**, and add
+3. Enter the token in the popup (input is hidden), open its bot link, press **Start**, and add
    the bot to the group with **Manage topics**, **Delete messages**, and
    **Pin messages**. The account that selects the group becomes an operator.
 4. Confirm the group in the popup. The daemon starts and later starts with

@@ -42,6 +42,7 @@ func (g *redactingGateway) Send(ctx context.Context, out domain.Outgoing) (int, 
 	}
 	stats := domain.RedactionStats{}
 	out.Text = g.redact(out.Text, stats)
+	out.Footer = g.redact(out.Footer, stats)
 	out.Buttons = g.redactButtons(out.Buttons, stats)
 	g.report(out.ThreadID, "send", stats)
 	return g.TelegramGateway.Send(ctx, out)
@@ -53,6 +54,7 @@ func (g *redactingGateway) SendDirect(ctx context.Context, userID int64, out dom
 	}
 	stats := domain.RedactionStats{}
 	out.Text = g.redact(out.Text, stats)
+	out.Footer = g.redact(out.Footer, stats)
 	out.Buttons = g.redactButtons(out.Buttons, stats)
 	g.report(0, "direct", stats)
 	return g.TelegramGateway.SendDirect(ctx, userID, out)
@@ -65,6 +67,7 @@ func (g *redactingGateway) SendDocument(ctx context.Context, doc domain.Document
 	stats := domain.RedactionStats{}
 	doc.Data = []byte(g.redact(string(doc.Data), stats))
 	doc.Caption = g.redact(doc.Caption, stats)
+	doc.Name = g.redact(doc.Name, stats)
 	g.report(doc.ThreadID, "document", stats)
 	return g.TelegramGateway.SendDocument(ctx, doc)
 }

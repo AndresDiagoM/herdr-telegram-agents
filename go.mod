@@ -1,10 +1,10 @@
 module github.com/permgps/herdr-telegram-agents
 
-go 1.25
+go 1.25.14
 
 require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/go-telegram/bot v1.25.0
+	golang.org/x/sys v0.44.0
+	golang.org/x/term v0.43.0
 )
-
-require golang.org/x/sys v0.10.0

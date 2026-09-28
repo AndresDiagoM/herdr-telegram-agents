@@ -19,12 +19,12 @@ func TestRedactingGatewayMasksEverythingThatLeaves(t *testing.T) {
 	ctx := context.Background()
 
 	buttons := []domain.Button{{Text: "1️⃣ use " + testKey, Data: "1"}, {Text: "2️⃣ no", Data: "2"}}
-	id, err := tg.Send(ctx, domain.Outgoing{ThreadID: 0, Text: "token " + testBotToken + " and " + testKey, Buttons: buttons})
+	id, err := tg.Send(ctx, domain.Outgoing{ThreadID: 0, Text: "token " + testBotToken + " and " + testKey, Footer: testBotToken, Buttons: buttons})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sent := fake.Sent()
-	if len(sent) != 1 || sent[0].Text != "token [redacted] and sk-…uvwx" {
+	if len(sent) != 1 || sent[0].Text != "token [redacted] and sk-…uvwx" || sent[0].Footer != "[redacted]" {
 		t.Fatalf("Sent = %+v", sent)
 	}
 	if got := fake.Buttons(id); got[0].Text != "1️⃣ use sk-…uvwx" || got[1].Text != "2️⃣ no" {
@@ -34,11 +34,11 @@ func TestRedactingGatewayMasksEverythingThatLeaves(t *testing.T) {
 		t.Fatal("caller's keyboard was rewritten in place")
 	}
 
-	if err := tg.SendDocument(ctx, domain.Document{ThreadID: 0, Name: "s.txt", Data: []byte("line " + testKey + "\n"), Caption: "cap " + testBotToken}); err != nil {
+	if err := tg.SendDocument(ctx, domain.Document{ThreadID: 0, Name: testBotToken + ".txt", Data: []byte("line " + testKey + "\n"), Caption: "cap " + testBotToken}); err != nil {
 		t.Fatal(err)
 	}
 	docs := fake.Documents()
-	if len(docs) != 1 || string(docs[0].Data) != "line sk-…uvwx\n" || docs[0].Caption != "cap [redacted]" {
+	if len(docs) != 1 || string(docs[0].Data) != "line sk-…uvwx\n" || docs[0].Caption != "cap [redacted]" || docs[0].Name != "[redacted].txt" {
 		t.Fatalf("Documents = %+v", docs)
 	}
 
@@ -55,11 +55,11 @@ func TestRedactingGatewayMasksEverythingThatLeaves(t *testing.T) {
 		t.Fatalf("EditButtons left %+v", fake.Buttons(id))
 	}
 
-	did, err := tg.SendDirect(ctx, 77, domain.Outgoing{Text: "❓ waiting " + testKey, Notify: true, Buttons: []domain.Button{{Text: "use " + testKey, Data: "1"}}})
+	did, err := tg.SendDirect(ctx, 77, domain.Outgoing{Text: "❓ waiting " + testKey, Footer: testBotToken, Notify: true, Buttons: []domain.Button{{Text: "use " + testKey, Data: "1"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if direct := fake.Direct(); len(direct) != 1 || direct[0].Text != "❓ waiting sk-…uvwx" || !direct[0].Notify || fake.Buttons(did)[0].Text != "use sk-…uvwx" {
+	if direct := fake.Direct(); len(direct) != 1 || direct[0].Text != "❓ waiting sk-…uvwx" || direct[0].Footer != "[redacted]" || !direct[0].Notify || fake.Buttons(did)[0].Text != "use sk-…uvwx" {
 		t.Fatalf("Direct = %+v / %+v", fake.Direct(), fake.Buttons(did))
 	}
 

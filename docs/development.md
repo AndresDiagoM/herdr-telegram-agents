@@ -8,7 +8,7 @@ install` downloads a prebuilt binary (see the README).
 
 ## Requirements
 
-- Go `1.25` or newer
+- Go `1.25.14` or newer (use a maintained security patch release)
 - `staticcheck` in `$HOME/go/bin` (`make lint` runs it)
 - [GoReleaser](https://goreleaser.com) only for `make release-snapshot`
 

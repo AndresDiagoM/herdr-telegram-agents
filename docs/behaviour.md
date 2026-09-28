@@ -533,7 +533,8 @@ you can see the plugin working. Tick `Quiet while at the desk` in
 
 Every text that leaves the daemon for Telegram (blocked and done posts,
 `/screen` and `/screen all`, the `.txt` document, the follow-up of a
-forwarded Claude Code command, the labels of inline buttons, panel edits)
+forwarded Claude Code command, summary footers, document names, the labels
+of inline buttons, panel edits)
 passes one redaction step while `Redact secrets` is on:
 
 - API keys and tokens keep a recognisable prefix and their last four

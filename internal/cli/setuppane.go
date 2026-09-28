@@ -13,6 +13,8 @@ import (
 	"strings"
 	"syscall"
 
+	"golang.org/x/term"
+
 	"github.com/permgps/herdr-telegram-agents/internal/domain"
 )
 
@@ -23,12 +25,12 @@ type setupRunner interface {
 }
 
 // consoleUI implements domain.SetupUI over a line-oriented terminal. The
-// token is typed visibly: the popup runs without raw-mode support and the
-// pane closes as soon as setup ends.
+// token is read without terminal echo. Redirected input remains supported.
 type consoleUI struct {
-	in   *bufio.Reader
-	out  io.Writer
-	open func(url string) error
+	in         *bufio.Reader
+	out        io.Writer
+	open       func(url string) error
+	readSecret func() ([]byte, error)
 }
 
 var _ domain.SetupUI = (*consoleUI)(nil)
@@ -39,7 +41,11 @@ func newConsoleUI(in io.Reader, out io.Writer, open func(url string) error) *con
 	if open == nil {
 		open = func(string) error { return errors.New("no link opener") }
 	}
-	return &consoleUI{in: bufio.NewReader(in), out: out, open: open}
+	u := &consoleUI{in: bufio.NewReader(in), out: out, open: open}
+	if f, ok := in.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+		u.readSecret = func() ([]byte, error) { return term.ReadPassword(int(f.Fd())) }
+	}
+	return u
 }
 
 func (u *consoleUI) Print(text string) { fmt.Fprintln(u.out, text) }
@@ -52,8 +58,19 @@ func (u *consoleUI) Ask(prompt string) (string, error) {
 }
 
 func (u *consoleUI) AskSecret(prompt string) (string, error) {
-	fmt.Fprintln(u.out, "(the token is visible while you type; this pane closes when setup ends)")
-	return u.Ask(prompt)
+	if u.readSecret == nil {
+		return u.Ask(prompt)
+	}
+	if u.in.Buffered() != 0 {
+		return "", errors.New("unexpected buffered input before secret prompt; restart setup and enter each answer separately")
+	}
+	fmt.Fprint(u.out, prompt+" ")
+	secret, err := u.readSecret()
+	fmt.Fprintln(u.out)
+	if err != nil {
+		return "", fmt.Errorf("read secret: %w", err)
+	}
+	return strings.TrimSpace(string(secret)), nil
 }
 
 func (u *consoleUI) Confirm(prompt string) (bool, error) {
