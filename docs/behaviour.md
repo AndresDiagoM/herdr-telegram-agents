@@ -302,7 +302,7 @@ above catches the case where the other pane wrote before this turn began);
 other agents (Pi, Gemini) always get the screen; when no transcript or no
 text is found the daemon posts the screen and logs `reply source
 unavailable` with a safe category. Blocked posts are never affected: the dialog
-with its buttons exists only on the screen. For an idle or done OpenCode agent,
+with its buttons exists only on the screen. For an idle or done OpenCode or Codex agent,
 a bare `/screen` tries the current session reply, rendered like `Formatted`,
 whatever `Done post` says. It falls back to the screen when the reply is
 unavailable, empty, or stale. The reply stops after five Telegram messages

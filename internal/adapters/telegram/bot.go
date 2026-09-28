@@ -114,7 +114,7 @@ func Poll(ctx context.Context, b *bot.Bot, log *slog.Logger) {
 // status, options and help, in General (options, new, observers, away and
 // here only there).
 var botCommands = []models.BotCommand{
-	{Command: "screen", Description: "Show screen; idle OpenCode: last reply (N: screen tail, all: history)"},
+	{Command: "screen", Description: "Show screen; idle OpenCode/Codex: last reply (N: screen tail, all: history)"},
 	{Command: "keys", Description: "Send raw keys to the agent, e.g. /keys esc"},
 	{Command: "focus", Description: "Bring the agent's pane to the front in Herdr"},
 	{Command: "git", Description: "git status | diff [staged] | log [N] in the agent's directory"},
