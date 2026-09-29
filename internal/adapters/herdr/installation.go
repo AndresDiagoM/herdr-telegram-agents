@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -123,7 +122,7 @@ func (r *InstallationReader) ReadInstallation(ctx context.Context) (domain.Plugi
 func installationCommand(ctx context.Context, dir, bin string, args ...string) ([]byte, error) {
 	callCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(callCtx, bin, args...)
+	cmd := command(callCtx, bin, args...)
 	cmd.Dir = dir
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr

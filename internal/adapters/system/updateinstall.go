@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -227,7 +226,7 @@ func copyUpdateFile(source, destination string) error {
 func updateCommand(ctx context.Context, dir, bin string, args ...string) error {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(callCtx, bin, args...)
+	cmd := command(callCtx, bin, args...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat")
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard

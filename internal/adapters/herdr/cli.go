@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"time"
 
@@ -65,7 +64,7 @@ func panePath(root, path string) string {
 func (c *CLI) run(ctx context.Context, args []string) error {
 	ctx, cancel := context.WithTimeout(ctx, cliTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, c.bin, args...)
+	cmd := command(ctx, c.bin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	start := time.Now()

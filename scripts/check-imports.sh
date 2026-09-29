@@ -128,6 +128,21 @@ if [ -n "$envhits" ]; then
 	fail=1
 fi
 
+# Child processes start through each adapter's command() helper, which hides
+# the console window on Windows. Only the daemon spawn in process.go, which
+# uses DETACHED_PROCESS instead, calls exec.Command directly.
+exechits=$(grep -rn --include='*.go' -e 'exec\.Command(' -e 'exec\.CommandContext(' cmd internal 2>/dev/null |
+	grep -v '_test\.go:' |
+	grep -v '^internal/adapters/system/command\.go:' |
+	grep -v '^internal/adapters/herdr/command\.go:' |
+	grep -v '^internal/adapters/system/process\.go:' || true)
+if [ -n "$exechits" ]; then
+	echo "$exechits" | while read -r hit; do
+		echo "${hit%%:*} calls exec.Command directly (use the package's command() helper so Windows hides the console)"
+	done
+	fail=1
+fi
+
 if [ "$fail" = 1 ]; then
 	exit 1
 fi

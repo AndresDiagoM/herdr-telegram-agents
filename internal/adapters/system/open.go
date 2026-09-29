@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -24,7 +23,7 @@ func OpenURL(ctx context.Context, url string) error {
 	}
 	ctx, cancel := context.WithTimeout(ctx, openTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+	out, err := command(ctx, name, args...).CombinedOutput()
 	if err != nil {
 		if msg := strings.TrimSpace(string(out)); msg != "" {
 			return fmt.Errorf("%s: %w: %s", name, err, msg)
