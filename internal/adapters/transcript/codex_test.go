@@ -184,6 +184,46 @@ func TestCodexNestedTurnStartDoesNotEndTheWalk(t *testing.T) {
 	}
 }
 
+// TestCodexUnreadableNewestBoundary covers a newest turn record that cannot
+// be used: a half-written last line and a task_started whose fields changed
+// type. Walking past either would post the previous turn's answer while a new
+// turn runs.
+func TestCodexUnreadableNewestBoundary(t *testing.T) {
+	half := codexStarted("turn-b")
+	cases := map[string]string{
+		"half-written last line": strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + half[:len(half)/2],
+		"changed field type":     strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + strings.Replace(codexStarted("turn-b"), `"started_at":1790000000`, `"started_at":1790000100.5`, 1) + "\n",
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCodexFixture(t)
+			dir := f.rolloutDir(codexTestID)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "rollout-2026-09-26T09-59-58-"+codexTestID+".jsonl"), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			reply, err := f.reader().LastReply(context.Background(), f.agent())
+			if !errors.Is(err, domain.ErrNoReply) {
+				t.Fatalf("reply = %q, err = %v; want ErrNoReply, never the previous turn's answer", reply.Text, err)
+			}
+			noLeak(t, "error", err.Error())
+		})
+	}
+}
+
+// TestCodexTokensOfTheNewestUsageRecord covers a turn with several usage
+// records whose cumulative output tokens rise: the newest one is the total.
+func TestCodexTokensOfTheNewestUsageRecord(t *testing.T) {
+	f := newCodexFixture(t)
+	f.write(codexTestID, codexStarted("turn-a"), codexUsage("turn-a", 5), codexUsage("turn-a", 9), codexUsage("turn-a", 12), codexComplete("turn-a", "answer"))
+	reply, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || reply.Meta.OutputTokens != 12 {
+		t.Fatalf("tokens = %d, err = %v; want 12", reply.Meta.OutputTokens, err)
+	}
+}
+
 func TestCodexNoReply(t *testing.T) {
 	interrupted := codexLine("event_msg", map[string]any{"type": "turn_aborted", "turn_id": "turn-b", "reason": "interrupted", "started_at": codexT0, "completed_at": codexT1})
 	cases := map[string][]string{
@@ -378,7 +418,11 @@ func TestCodexAnswerSurvivesABudgetCutBeforeTheTurnStart(t *testing.T) {
 // as an *fs.PathError does.
 type codexLeakyReader struct{}
 
-func (codexLeakyReader) ReadAt([]byte, int64) (int, error) {
+func (codexLeakyReader) ReadAt(p []byte, off int64) (int, error) {
+	if len(p) == 1 && off == 1<<20-1 {
+		p[0] = '\n' // the last byte: the file ends cleanly, the walk's reads fail
+		return 1, nil
+	}
 	return 0, &os.PathError{Op: "read", Path: `C:\Users\x\.codex\sessions\2026\09\26\rollout-2026-09-26T09-59-58-` + codexTestID + `.jsonl`, Err: errors.New("device error")}
 }
 

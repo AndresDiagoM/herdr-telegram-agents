@@ -287,6 +287,18 @@ func codexLastReplyFrom(f io.ReaderAt, size, budget int64) (string, domain.TurnM
 	f = codexReadAt{f}
 	var stats scanStats
 	var meta domain.TurnMeta
+	// A record Codex is still writing has no newline yet: the newest turn
+	// boundary may be that half line, and walking past it would answer with
+	// the previous turn's reply.
+	if size > 0 {
+		var last [1]byte
+		if _, err := f.ReadAt(last[:], size-1); err != nil && !errors.Is(err, io.EOF) {
+			return "", domain.TurnMeta{}, stats, fmt.Errorf("%w: the rollout could not be read", domain.ErrNoReply)
+		}
+		if last[0] != '\n' {
+			return "", domain.TurnMeta{}, stats, fmt.Errorf("%w: the rollout ends mid-record", domain.ErrNoReply)
+		}
+	}
 	var text, turnID string
 	var haveOutcome, haveTokens bool
 	visit := func(line []byte) error {
@@ -304,6 +316,11 @@ func codexLastReplyFrom(f io.ReaderAt, size, budget int64) (string, domain.TurnM
 		}
 		var rec codexRecord
 		if err := json.Unmarshal(line, &rec); err != nil {
+			if !haveOutcome {
+				// The newest turn boundary cannot be read (a changed field
+				// type, say): skipping it would answer with an older turn.
+				return fmt.Errorf("%w: the newest codex turn record is unreadable", domain.ErrNoReply)
+			}
 			stats.skipped++
 			return nil
 		}
