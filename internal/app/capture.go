@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,10 +21,11 @@ import (
 // in Herdr or sent from Telegram. Capture runs on its own goroutine owned
 // by Daemon.Run; Since is called from the bridge goroutine.
 type Capture struct {
-	herdr domain.HerdrGateway
-	live  func() []domain.Agent
-	clock domain.Clock
-	log   *slog.Logger
+	privateFrames map[domain.Key][]privateFrame
+	herdr         domain.HerdrGateway
+	live          func() []domain.Agent
+	clock         domain.Clock
+	log           *slog.Logger
 
 	mu     sync.Mutex
 	hist   map[domain.Key]*domain.History
@@ -49,19 +51,20 @@ func NewCapture(herdr domain.HerdrGateway, live func() []domain.Agent, clock dom
 		log = slog.New(slog.DiscardHandler)
 	}
 	return &Capture{
-		herdr:       herdr,
-		live:        live,
-		clock:       clock,
-		log:         log,
-		hist:        map[domain.Key]*domain.History{},
-		last:        map[domain.Key]string{},
-		source:      map[domain.Key]domain.ScreenSource{},
-		status:      map[domain.Key]domain.Status{},
-		left:        map[domain.Key]time.Time{},
-		Interval:    captureInterval,
-		Grace:       captureGrace,
-		MinAway:     captureMarkMinAway,
-		ReadTimeout: captureReadTimeout,
+		herdr:         herdr,
+		live:          live,
+		clock:         clock,
+		log:           log,
+		hist:          map[domain.Key]*domain.History{},
+		privateFrames: map[domain.Key][]privateFrame{},
+		last:          map[domain.Key]string{},
+		source:        map[domain.Key]domain.ScreenSource{},
+		status:        map[domain.Key]domain.Status{},
+		left:          map[domain.Key]time.Time{},
+		Interval:      captureInterval,
+		Grace:         captureGrace,
+		MinAway:       captureMarkMinAway,
+		ReadTimeout:   captureReadTimeout,
 	}
 }
 
@@ -75,6 +78,7 @@ func (c *Capture) Observe(ev AgentEvent) {
 	defer c.mu.Unlock()
 	if ev.Kind == AgentGone {
 		delete(c.hist, key)
+		delete(c.privateFrames, key)
 		delete(c.last, key)
 		delete(c.source, key)
 		delete(c.status, key)
@@ -221,6 +225,7 @@ func (c *Capture) merge(key domain.Key, screen domain.Screen, source domain.Scre
 		added, shift, gap = h.Append(screenLines(screen.Text))
 	}
 	c.last[key] = hash
+	c.recordPrivateFrame(key, screen.Text)
 	if gap {
 		c.log.Warn("screen history gap", slog.String("key", key.String()),
 			slog.String("source", string(source)), slog.Int64("revision", screen.Revision),
@@ -257,4 +262,38 @@ func (c *Capture) history(key domain.Key) *domain.History {
 		c.hist[key] = h
 	}
 	return h
+}
+
+// Private frames share the existing capture loop. No old owner history buffer
+// is consulted by private exports, including after regrant or restart.
+type privateFrame struct {
+	at   time.Time
+	text string
+}
+
+func (c *Capture) recordPrivateFrame(key domain.Key, text string) {
+	frames := append(c.privateFrames[key], privateFrame{at: c.clock.Now(), text: text})
+	bytes, lines := 0, 0
+	start := len(frames)
+	for start > 0 {
+		f := frames[start-1]
+		if bytes+len(f.text) > domain.HistoryMaxBytes || lines+strings.Count(f.text, "\n")+1 > domain.HistoryMaxLines {
+			break
+		}
+		bytes += len(f.text)
+		lines += strings.Count(f.text, "\n") + 1
+		start--
+	}
+	c.privateFrames[key] = append([]privateFrame(nil), frames[start:]...)
+}
+func (c *Capture) PrivateSince(key domain.Key, activation time.Time) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var parts []string
+	for _, f := range c.privateFrames[key] {
+		if f.at.After(activation) {
+			parts = append(parts, f.text)
+		}
+	}
+	return strings.Join(parts, "\n…\n")
 }

@@ -100,7 +100,7 @@ func TestDoctorAllGreen(t *testing.T) {
 	want := map[string]string{
 		"config":        `config.json v1: @agents_bot, chat "Agents" (-1001), 2 operators, 1 observer, log level debug`,
 		"options":       "defaults",
-		"telegram":      "@fakebot (id 42)",
+		"telegram":      "@fakebot (id 42); private sharing unavailable: enable Topics in BotFather",
 		"group":         `"Agents": forum yes, admin yes, manage topics yes, delete messages yes, pin messages yes`,
 		"operator chat": "2 operators reachable, questions can ring from the bot's chat",
 		"herdr":         "version fake, protocol 17",

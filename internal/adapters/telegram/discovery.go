@@ -83,7 +83,7 @@ func (p *Probe) Identity(ctx context.Context) (domain.BotIdentity, error) {
 	p.botID = me.ID
 	p.mu.Unlock()
 	p.log.Info("setup probe identified bot", slog.Int64("bot_id", me.ID), slog.String("username", me.Username))
-	return domain.BotIdentity{ID: me.ID, Username: me.Username}, nil
+	return domain.BotIdentity{ID: me.ID, Username: me.Username, HasTopicsEnabled: me.HasTopicsEnabled}, nil
 }
 
 // Candidates starts polling and streams groups until ctx is done or Close

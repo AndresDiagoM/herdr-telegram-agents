@@ -183,6 +183,64 @@ bot's chat` is on (`⚠️ questions will ring in the topics …`). Above them
 sits the pinned dashboard: one message, edited in place, with every live
 agent, its status and how long it has been in it.
 
+## Sharing an agent privately
+
+Private sharing uses the same bot and daemon as the owner group. Enable
+**Threads Settings → Threaded Mode** for that bot in BotFather. The sharing panel refreshes the bot's
+capability when granting access; the owner group still works if it is disabled.
+
+1. The recipient sends `/start` or another message directly to the bot. A genuine
+   private contact registers their numeric Telegram ID; forwarding someone else's
+   message does not register that person. Registration grants no access and does
+   not forward the message or download its attachment.
+2. In the owner's agent topic, an operator sends `/share`. Select the recipient
+   by numeric ID. `/share alice` searches names, usernames and IDs; use the page
+   buttons for more than ten contacts. Duplicate display names are allowed.
+3. Choose **Read** (the default) or **Control**, optional capabilities, and an
+   expiry: one hour, one day, seven days, or no expiry. Review and confirm.
+4. The recipient gets a private agent topic and an access card. Existing output
+   is not replayed. New output is shared, including results of owner prompts.
+5. Use `/shares` in the owner topic to change rights or expiry, suspend/resume,
+   revoke, repair an uncertain topic creation, or explicitly delete its history.
+   In General, `/shares` covers all agents and `/share` manages the directory.
+   Hiding a contact does not revoke their existing grants.
+
+To retain grants across plugin restarts, install the integration for the agent
+being shared, for example `herdr integration install codex` or
+`herdr integration install claude`. `herdr integration status` reports what is
+installed. Herdr must receive a genuine session-start report before it can
+identify the session. A grant initially created without identity needs one new
+owner confirmation after identity becomes available; subsequent plugin restarts
+can preserve grants for that verified session. See
+[Herdr integrations](https://herdr.dev/docs/integrations/).
+
+**Control uses the existing session and its filesystem/tool permissions.**
+Owners and other controllers retain access. It does not isolate the recipient's
+requests in a separate operating-system account.
+
+| Private action | Required access |
+| --- | --- |
+| `/agents`, `/status`, `/help`, `/screen [N]` | Read or Control |
+| `/screen all` | History captured after this grant's activation |
+| Prompts, supported files, dialog buttons, `/keys`, `/stop`, `/interrupt` | Control |
+| `/clear`, `/compact`, `/usage`, `/model` | Control; Claude Code only |
+| `/git status`, `/git diff`, `/git log` | Control, or Read with repository-read enabled |
+| `/close` | Control plus close-agent permission; separate confirmation |
+| `/focus` | Control plus local-focus permission |
+| `/pause`, `/resume`, `/alias NAME` | Local mirror settings; Read or Control |
+| `/silent`, `/display screen\|reply\|formatted`, `/fold 0..200`, `/metadata` | Local display and notification settings |
+
+`/silent` and `/metadata` toggle their settings. `/alias` without a name restores
+the agent label. Pausing suppresses automatic output and status edits; explicit
+screen requests still work. Resuming requests at most the current relevant
+update. Global owner administration and unknown slash commands are refused in
+private topics, even when the recipient is also an owner operator.
+
+`/agents` opens a scoped service topic with status/screen/pause buttons. Its bot
+links identify only an opaque mirror reference and recheck the actual sender.
+Telegram may require manually opening the topic after following a link. Private
+navigation does not use group `t.me/c` links.
+
 ## See Also
 
 - [Behaviour](behaviour.md): topic naming and icons, the dashboard, the options panel, silencing the group, quiet mode, secrets, operators and observers, topic cleanup, logs and state

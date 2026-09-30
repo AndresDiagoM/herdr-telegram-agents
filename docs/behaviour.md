@@ -639,6 +639,7 @@ in `config.json`:
 |------|----------|---------|
 | `config.json` | Herdr plugin config dir (`HERDR_PLUGIN_CONFIG_DIR`), mode 0600 | bot token, chat id and title, operator ids, observer ids (`observer_ids`, written by `/observers`), log level |
 | `mapping.json` | Herdr plugin state dir (`HERDR_PLUGIN_STATE_DIR`) | agent to topic mapping, the dashboard message id (`dashboard_message_id`), and pending creation markers; exited entries stay until topic cleanup confirms deletion |
+| `sharing.json` | state dir, mode 0600 | recipients, grants, revisions, private topics, dashboard IDs and pending creation intents |
 | `options.json` | config dir, mode 0600 | the `/options` choices |
 | `inbox/` | state dir, mode 0700, files 0600 | attachments sent to topics, swept daily after `Delete files after` |
 | `daemon.pid` | state dir | pid of the running daemon |
@@ -667,10 +668,64 @@ the [topic cleanup](#topic-cleanup) deletes the topic and the entry together.
 Delete `options.json` in the config dir to return every option to its
 default.
 
+## Private mirror lifecycle and recovery
+
+A mirror binds a numeric recipient, private chat/topic, grant revision and exact
+agent session. It cannot follow a replacement session merely because its name
+or working directory matches. An exited session rejects input; verified resume
+can reuse the topic. Incomplete session identity requires owner reapproval after
+restart. Private topics are never closed or reopened through supergroup APIs.
+The existing exited-topic retention setting can remove old exited mirrors;
+policy records remain to prevent stale work from regaining access.
+
+Revocation and expiry deny new dispatches, cancel pending work and invalidate
+buttons. Already dispatched messages and running agent work cannot be recalled.
+History remains until the owner explicitly deletes the mirror or exited-topic
+retention applies. Permission changes are saved before success is reported. If
+saving a revocation fails, access is denied in memory, but **do not restart until
+saving succeeds**: the older on-disk policy may still allow access. Metadata and
+presentation changes are coalesced and flushed at shutdown.
+
+`sharing.json` is a separate versioned, atomically replaced mode-0600 file in the
+plugin state directory. Corrupt or unsupported state disables guest access and
+preserves the file; owner mapping remains independent. Switching bots does not
+reuse private bindings from the previous bot. An unknown topic-creation outcome
+keeps a durable intent. Use the owner repair action after checking the recipient's
+chat: Telegram cannot enumerate every topic whose creation reply was lost.
+The overview has its own **service-repair-confirm** action for this case.
+
+Private output is always redacted. It uses exact-session OpenCode replies where
+available, otherwise the exact target's terminal screen. The Claude reader that
+selects a transcript by working directory is never used for guests. Automatic
+reply delivery excludes replies written before activation. Explicit `/screen`
+can reveal older material still visible in that same session; `/screen all`
+exports only screens captured since activation, not the owner's earlier buffer.
+
+Blocked output has one notification in each active private topic; done posts are
+silent. There is no additional recipient pager. Owner desk presence does not
+silence recipients; global sync-off stops automatic mirror output and status
+edits. Local pause and silent mode default off. Edit/pin service notices use the
+existing notice delay (20 seconds by default), or Keep. Creation notices remain.
+Private cleanup uses the actual chat and does not require group admin rights.
+Client icon propagation and service-notice sounds still require the
+[phone/Desktop acceptance checks](testing.md#private-sharing-acceptance).
+
+Bounds: 10,000 registered contacts, 2,000 grants, 64 pending albums with ten files
+each, 20 MiB per file and 40 MiB per album, four concurrent private transfers,
+4,096 temporary private callbacks and 2,048 owner panel references. Private API
+calls use four separate bounded queues and a two-second call budget. Ambiguous
+private calls are not automatically replayed. A failed post may require another
+screen request. Durable first-contact registration happens before acknowledging
+Telegram updates; storage failures at this boundary can delay polling until
+storage recovers. Private event admission allows eight requests per recipient and
+32 overall per ten seconds, with a separate 32-slot bridge queue. Congestion
+notices are bounded and best effort; contact registration remains durable even
+when an agent request is rejected. Previously dropped or expired Telegram updates are unrecoverable.
+
 ## See Also
 
 - [Talking to agents](commands.md): what gets posted and what you can send
 - [Silence the group](#silence-the-group): mute the group once, let questions ring from the bot's chat
 - [Operators and observers](#operators-and-observers): who may drive the agents, who may only watch, and how strangers show up
-- [README: Actions](../README.md#actions): start, stop, resync, status, logs, doctor and the test message from Herdr
+- [README: Setup](../README.md#setup): start, stop, resync, status, logs, doctor and the test message from Herdr
 - [Development](development.md): building from source and the tree layout

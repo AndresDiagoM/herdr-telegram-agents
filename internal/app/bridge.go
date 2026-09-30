@@ -19,12 +19,18 @@ import (
 // share the serial Telegram queue. Fatal Telegram errors are reported
 // through Fatal.
 type Bridge struct {
-	out *outbound
-	in  *inbound
+	PrivateControl    *PrivateControl
+	PrivateReconciler *PrivateReconciler
+	Shares            *SharePanel
+	PrivateHandler    func(context.Context, domain.PrivateMessage) error
+	out               *outbound
+	in                *inbound
 	// jobs carries agent state. control preserves the order of
 	// operator actions and asynchronous results under load.
-	jobs    chan any
-	control chan any
+	jobs        chan any
+	control     chan any
+	privateJobs chan any
+	PrivateBusy func(int64)
 	// fatal carries the first fatal error; the daemon reads it once.
 	fatal   chan error
 	dropped atomic.Int64
@@ -88,6 +94,7 @@ func NewBridge(cfg domain.Config, herdr domain.HerdrGateway, tg domain.TelegramG
 		in:          in,
 		jobs:        make(chan any, bridgeBuffer),
 		control:     make(chan any, bridgeBuffer),
+		privateJobs: make(chan any, 32),
 		fatal:       make(chan error, 1),
 		log:         log,
 		CallTimeout: bridgeCallTimeout,
@@ -191,11 +198,26 @@ func (b *Bridge) Submit(job any) {
 // SubmitContext accepts all known work with cancellable backpressure.
 // State and control have separate bounded queues; neither may be lost.
 func (b *Bridge) SubmitContext(ctx context.Context, job any) error {
+	if e, ok := job.(domain.PrivateMessage); ok {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		select {
+		case b.privateJobs <- e:
+			return nil
+		default:
+			if b.PrivateBusy != nil {
+				b.PrivateBusy(e.Contact.ActorID)
+			}
+			b.log.Warn("private bridge ingress busy", "recipient_id", e.Contact.ActorID)
+			return nil
+		}
+	}
 	var queue chan any
 	switch job.(type) {
 	case AgentEvent:
 		queue = b.jobs
-	case domain.TopicMessage, domain.TopicAttachment, domain.ButtonPressed, domain.GeneralCommand, domain.StrangerSeen, presenceAway, startResult, inboxResult, updateCheckResult, updateStartResult:
+	case privateResult, domain.TopicMessage, domain.TopicAttachment, domain.ButtonPressed, domain.GeneralCommand, domain.StrangerSeen, presenceAway, startResult, inboxResult, updateCheckResult, updateStartResult:
 		queue = b.control
 	default:
 		b.log.Warn("bridge job of unknown type dropped", slog.String("type", fmt.Sprintf("%T", job)))
@@ -236,6 +258,10 @@ func (b *Bridge) Run(ctx context.Context) {
 	}()
 	b.runCtx = ctx
 	defer b.wg.Wait()
+	var privateTick <-chan time.Time
+	if b.PrivateControl != nil {
+		privateTick = b.in.clock.After(time.Second)
+	}
 	controlBurst := 0
 	for {
 		// Bound consecutive control jobs. A ready state event or timer gets
@@ -293,6 +319,13 @@ func (b *Bridge) Run(ctx context.Context) {
 		case key := <-b.in.Due():
 			b.run(ctx, "command", func(ctx context.Context) error { return b.in.Fire(ctx, key) })
 			controlBurst = 0
+		case job := <-b.privateJobs:
+			b.handle(ctx, job)
+			b.handled.Add(1)
+			controlBurst = 0
+		case <-privateTick:
+			privateTick = b.in.clock.After(time.Second)
+			b.run(ctx, "private_tick", b.PrivateControl.Tick)
 		case key := <-b.out.TurnDue():
 			b.run(ctx, "turn", func(ctx context.Context) error { return b.out.EndTurn(ctx, key) })
 			controlBurst = 0
@@ -302,9 +335,19 @@ func (b *Bridge) Run(ctx context.Context) {
 
 func (b *Bridge) handle(ctx context.Context, job any) {
 	switch j := job.(type) {
+	case privateResult:
+		if j.run != nil {
+			b.run(ctx, "private_result", j.run)
+		}
 	case AgentEvent:
 		b.log.Debug("bridge job", slog.String("kind", "agent_event"), slog.String("event", string(j.Kind)), slog.String("key", j.Agent.Key.String()))
 		b.out.Observe(j)
+		if b.PrivateControl != nil && b.PrivateControl.Output != nil {
+			b.PrivateControl.Output.Observe(j)
+		}
+		if b.PrivateReconciler != nil {
+			b.run(ctx, "private_lifecycle", func(ctx context.Context) error { return b.PrivateReconciler.Observe(ctx, j) })
+		}
 		if j.ReassociatedFrom != nil {
 			b.in.Reassociate(*j.ReassociatedFrom, j.Agent.Key)
 		}
@@ -313,6 +356,10 @@ func (b *Bridge) handle(ctx context.Context, job any) {
 			b.run(ctx, "forget", func(ctx context.Context) error { return b.out.Forget(ctx, j.Agent.Key) })
 		}
 	case domain.ButtonPressed:
+		if b.Shares != nil && strings.HasPrefix(j.Data, "sh:") {
+			b.run(ctx, "share_panel", func(ctx context.Context) error { return b.Shares.Press(ctx, j) })
+			return
+		}
 		b.log.Debug("bridge job", slog.String("kind", "button"), slog.Int("thread_id", j.ThreadID), slog.Int("message_id", j.MessageID))
 		if strings.HasPrefix(j.Data, panelPrefix) {
 			b.run(ctx, "options_button", func(ctx context.Context) error { return b.in.PressPanel(ctx, j) })
@@ -322,9 +369,30 @@ func (b *Bridge) handle(ctx context.Context, job any) {
 			b.run(ctx, "close_button", func(ctx context.Context) error { return b.in.PressClose(ctx, j) })
 			return
 		}
+		if b.PrivateControl != nil {
+			if key, ok := b.out.topics.KeyForThread(j.ThreadID); ok {
+				_ = b.PrivateControl.InvalidatePrivate(ctx, key)
+			}
+		}
 		b.run(ctx, "button", func(ctx context.Context) error { return b.out.Press(ctx, j) })
+	case domain.PrivateMessage:
+		if b.PrivateHandler != nil {
+			b.run(ctx, "private_message", func(ctx context.Context) error { return b.PrivateHandler(ctx, j) })
+		}
 	case domain.TopicMessage:
+		if b.sharingCommand(ctx, j.FromID, j.ChatID, j.ThreadID, j.MessageID, j.Text) {
+			return
+		}
 		b.log.Debug("bridge job", slog.String("kind", "topic_message"), slog.Int("thread_id", j.ThreadID), slog.Int("message_id", j.MessageID))
+		if b.PrivateControl != nil {
+			cmd := domain.ParseCommand(j.Text, "")
+			action, ok := domain.ShareCommandAction(cmd)
+			if ok && action != domain.ShareScreen && action != domain.ShareHistory && action != domain.ShareOverview && action != domain.ShareGit {
+				if key, ok := b.out.topics.KeyForThread(j.ThreadID); ok {
+					_ = b.PrivateControl.InvalidatePrivate(ctx, key)
+				}
+			}
+		}
 		b.run(ctx, "topic_message", func(ctx context.Context) error { return b.in.HandleTopic(ctx, j) })
 	case domain.TopicAttachment:
 		b.log.Debug("bridge job", slog.String("kind", "topic_attachment"), slog.Int("thread_id", j.ThreadID), slog.Int("message_id", j.MessageID),
@@ -334,6 +402,9 @@ func (b *Bridge) handle(ctx context.Context, job any) {
 		b.log.Debug("bridge job", slog.String("kind", "inbox_result"), slog.Int("message_id", j.messageID), slog.Int("saved", len(j.paths)), slog.Int("failed", len(j.failed)))
 		b.run(ctx, "inbox_result", func(ctx context.Context) error { return b.in.InboxFinished(ctx, j) })
 	case domain.GeneralCommand:
+		if b.sharingCommand(ctx, j.FromID, j.ChatID, 0, j.MessageID, j.Text) {
+			return
+		}
 		b.log.Debug("bridge job", slog.String("kind", "general_command"), slog.Int("message_id", j.MessageID), slog.String("role", j.Role.String()))
 		b.run(ctx, "general_command", func(ctx context.Context) error { return b.in.HandleGeneral(ctx, j) })
 	case domain.StrangerSeen:
@@ -370,4 +441,48 @@ func (b *Bridge) run(ctx context.Context, kind string, fn func(context.Context) 
 		return
 	}
 	b.log.Warn("bridge job failed", slog.String("kind", kind), slog.String("err", err.Error()))
+}
+
+func (b *Bridge) sharingCommand(ctx context.Context, actor, chat int64, thread, message int, text string) bool {
+	if b.Shares == nil {
+		return false
+	}
+	cmd := domain.ParseCommand(text, b.Shares.Config.BotUsername)
+	if cmd.Kind != domain.CmdShare && cmd.Kind != domain.CmdShares {
+		return false
+	}
+	b.run(ctx, "share_panel", func(ctx context.Context) error { return b.Shares.Open(ctx, actor, chat, thread, message, text) })
+	return true
+}
+
+type privateResult struct{ run func(context.Context) error }
+
+func (b *Bridge) SetPrivateControl(p *PrivateControl) {
+	b.PrivateControl = p
+	b.PrivateHandler = p.Handle
+	slots := make(chan struct{}, 4)
+	p.Async = func(run func(context.Context) func(context.Context) error) bool {
+		select {
+		case slots <- struct{}{}:
+		default:
+			return false
+		}
+		b.spawn(func(ctx context.Context) {
+			defer func() { <-slots }()
+			result := run(ctx)
+			if result != nil {
+				_ = b.SubmitContext(ctx, privateResult{result})
+			}
+		})
+		return true
+	}
+	p.InvalidateOwner = func(ctx context.Context, key domain.Key) error {
+		kb, ok := b.out.keyboards[key]
+		delete(b.out.keyboards, key)
+		delete(b.out.typing, key)
+		if ok {
+			return b.out.tg.EditButtons(ctx, kb.messageID, nil)
+		}
+		return nil
+	}
 }

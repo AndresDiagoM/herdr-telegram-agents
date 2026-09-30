@@ -59,6 +59,11 @@ statuses. Operators can add read-only observers with `/observers`.
 See [Commands](docs/commands.md) for every command and attachment rule, and
 [Behavior](docs/behaviour.md) for sync, settings, access, and daemon details.
 
+For selected recipients, enable the bot's private Topics in BotFather and use
+`/share` in an owner agent topic. Recipients must first message the bot.
+Choose Read or Control and confirm the numeric recipient ID. See the
+[private sharing walkthrough](docs/commands.md#sharing-an-agent-privately).
+
 ## Check for updates
 
 Open `/options` in General and press **Check for updates**. The first press

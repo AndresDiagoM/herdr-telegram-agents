@@ -430,3 +430,46 @@ type UpdateInstaller interface {
 type UpdateNotifier interface {
 	EditUpdate(ctx context.Context, messageID int, text string) error
 }
+
+// SharingStore persists a complete, validated policy snapshot atomically.
+// Missing state is empty; corrupt or unsupported state returns an error.
+type SharingStore interface {
+	Load(context.Context) (SharingState, error)
+	Save(context.Context, SharingState) error
+}
+
+// ShareDispatch synchronizes admission with policy replacement. Begin marks
+// an operation dispatched under a per-grant lock and returns a cancellation
+// context. The lock is released before network I/O. Revocation invalidates
+// future Begin calls and cancels admitted work without waiting for I/O.
+// Already admitted network work may finish: it cannot be recalled. A retry
+// or multipart continuation is a new dispatch and must call Begin again.
+type ShareDispatch interface {
+	Begin(context.Context, ShareOrigin, ShareAction) (context.Context, context.CancelFunc, AccessDecision)
+}
+
+// DispatchGuard is evaluated inside a queued operation before every attempt.
+// It returns the context cancelled by revocation and a release function.
+// An absent guard is reserved for owner-authorized management operations.
+type DispatchGuard func(context.Context) (context.Context, context.CancelFunc, error)
+
+// DestinationTelegram explicitly addresses all private-chat operations.
+// Private lifecycle deliberately has no close/reopen methods.
+type DestinationTelegram interface {
+	CreateTopicAt(context.Context, int64, string, Status, DispatchGuard) (Topic, error)
+	EditTopicAt(context.Context, TopicAddress, TopicPatch, DispatchGuard) error
+	DeleteTopicAt(context.Context, TopicAddress, DispatchGuard) error
+	SendAt(context.Context, TopicAddress, Outgoing, DispatchGuard) (int, error)
+	DocumentAt(context.Context, TopicAddress, Document, DispatchGuard) error
+	EditTextAt(context.Context, MessageAddress, string, bool, []Button, DispatchGuard) error
+	EditButtonsAt(context.Context, MessageAddress, []Button, DispatchGuard) error
+	ReactAt(context.Context, MessageAddress, string, DispatchGuard) error
+	PinAt(context.Context, MessageAddress, DispatchGuard) error
+	UnpinAt(context.Context, MessageAddress, DispatchGuard) error
+	DeleteMessageAt(context.Context, MessageAddress, DispatchGuard) error
+}
+
+// PrivateCommandRegistrar publishes a chat-scoped menu; it grants no rights.
+type PrivateCommandRegistrar interface {
+	RegisterPrivateCommands(context.Context, int64, []string) error
+}

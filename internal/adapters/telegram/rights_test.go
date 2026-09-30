@@ -91,7 +91,7 @@ func TestConnect(t *testing.T) {
 	if got := api.methods(); len(got) != 4 || got[0] != "getMe" || got[1] != "deleteWebhook" || got[2] != "getForumTopicIconStickers" || got[3] != "setMyCommands" {
 		t.Fatalf("methods = %v", got)
 	}
-	if v := api.callsOf("deleteWebhook")[0].form.Get("drop_pending_updates"); v != "true" {
+	if v := api.callsOf("deleteWebhook")[0].form.Get("drop_pending_updates"); v == "true" {
 		t.Fatalf("drop_pending_updates = %q", v)
 	}
 	done := make(chan struct{})

@@ -145,7 +145,13 @@ func (d *Doctor) checkTelegram(ctx context.Context, insp domain.TelegramInspecto
 	case err != nil:
 		return domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "getMe failed: " + failureReason(err)}
 	}
-	return domain.Check{Name: "telegram", Level: domain.CheckOK, Detail: fmt.Sprintf("@%s (id %d)", id.Username, id.ID)}
+	detail := fmt.Sprintf("@%s (id %d)", id.Username, id.ID)
+	if !id.PrivateTopicsReady() {
+		detail += "; private sharing unavailable: enable Topics in BotFather"
+	} else {
+		detail += "; private topics enabled"
+	}
+	return domain.Check{Name: "telegram", Level: domain.CheckOK, Detail: detail}
 }
 
 func (d *Doctor) checkGroup(ctx context.Context, insp domain.TelegramInspector) domain.Check {

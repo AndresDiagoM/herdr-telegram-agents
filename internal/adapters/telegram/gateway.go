@@ -46,8 +46,9 @@ const (
 
 // Config selects the forum group and who may talk to the bot in it.
 type Config struct {
-	ChatID    int64
-	Operators []int64
+	RejectBefore time.Time
+	ChatID       int64
+	Operators    []int64
 	// Observers may read the group and use /status and /help in General;
 	// everything else from them is dropped.
 	Observers []int64
@@ -93,21 +94,27 @@ func (a *access) role(id int64) domain.Role {
 // Gateway implements domain.TelegramGateway on top of one bot client, a
 // serial call queue and the update handlers registered at construction.
 type Gateway struct {
-	api    *bot.Bot
-	chatID int64
-	botID  int64
+	privateNotices chan int64
+	private        privateIngress
+	cleanupMu      sync.Mutex
+	cleanupPending map[domain.MessageAddress]bool
+	rejectBefore   time.Time
+	api            *bot.Bot
+	chatID         int64
+	botID          int64
 	// access holds the operator and observer lists in force (SetAccess).
 	access atomic.Pointer[access]
 	icons  IconSet
 	// statusIcons is the emoji per status in force (SetStatusIcons);
 	// iconWarned lists emoji already reported as missing from the pack.
-	iconMu      sync.RWMutex
-	statusIcons domain.StatusIcons
-	iconWarned  map[string]bool
-	queue       *Queue
-	events      chan domain.Event
-	stopped     chan struct{}
-	log         *slog.Logger
+	iconMu        sync.RWMutex
+	statusIcons   domain.StatusIcons
+	iconWarned    map[string]bool
+	queue         *Queue
+	privateQueues []*Queue
+	events        chan domain.Event
+	stopped       chan struct{}
+	log           *slog.Logger
 	// http fetches file bytes from the file endpoint; downloads bypass
 	// the message queue because they are not Bot API method calls.
 	http *http.Client
@@ -115,6 +122,7 @@ type Gateway struct {
 	// notices are deleted, or noticeKeep to leave them in place; set from
 	// Config.NoticeDelay and replaced by SetNoticeDelay.
 	noticeDelay atomic.Int64
+	noticeSleep func(context.Context, time.Duration) error
 	// deleteWarned is set after the first failed service-message deletion
 	// so a missing right is reported once, not per edit.
 	deleteWarned atomic.Bool
@@ -127,6 +135,26 @@ type Gateway struct {
 
 var _ domain.TelegramGateway = (*Gateway)(nil)
 
+// Identity probes current bot capabilities through the running queue. A
+// failed lookup returns no usable capability rather than a stale allowance.
+func (g *Gateway) Identity(ctx context.Context) (domain.BotIdentity, error) {
+	var identity domain.BotIdentity
+	err := g.queue.Do(ctx, func(ctx context.Context) error {
+		me, err := g.api.GetMe(ctx)
+		if err != nil {
+			return translate(err)
+		}
+		identity = domain.BotIdentity{ID: me.ID, Username: me.Username, HasTopicsEnabled: me.HasTopicsEnabled}
+		return nil
+	})
+	if err != nil {
+		g.log.Warn("private topics capability probe failed")
+		return domain.BotIdentity{}, err
+	}
+	g.log.Debug("private topics capability probed", slog.Int64("bot_id", identity.ID), slog.Bool("enabled", identity.HasTopicsEnabled))
+	return identity, nil
+}
+
 // NewGateway wires the gateway and registers its update handlers on api, so
 // polling may start right after; call Run to serve outbound calls.
 func NewGateway(api *bot.Bot, cfg Config, queue *Queue, log *slog.Logger) *Gateway {
@@ -134,20 +162,30 @@ func NewGateway(api *bot.Bot, cfg Config, queue *Queue, log *slog.Logger) *Gatew
 		log = slog.New(slog.DiscardHandler)
 	}
 	g := &Gateway{
-		api:          api,
-		chatID:       cfg.ChatID,
-		botID:        cfg.BotID,
-		icons:        cfg.Icons,
-		statusIcons:  domain.DefaultStatusIcons(),
-		iconWarned:   map[string]bool{},
-		queue:        queue,
-		events:       make(chan domain.Event, eventBuffer),
-		stopped:      make(chan struct{}),
-		log:          log,
-		http:         &http.Client{Timeout: downloadTimeout},
-		lastStranger: map[int64]time.Time{},
+		privateNotices: make(chan int64, 32),
+		api:            api,
+		rejectBefore:   cfg.RejectBefore,
+		private:        privateIngress{started: queue.cfg.Now(), seen: map[int64]bool{}},
+		chatID:         cfg.ChatID,
+		botID:          cfg.BotID,
+		icons:          cfg.Icons,
+		statusIcons:    domain.DefaultStatusIcons(),
+		iconWarned:     map[string]bool{},
+		queue:          queue,
+		events:         make(chan domain.Event, eventBuffer),
+		stopped:        make(chan struct{}),
+		log:            log,
+		http:           &http.Client{Timeout: downloadTimeout},
+		lastStranger:   map[int64]time.Time{},
 	}
 	g.access.Store(newAccess(cfg.Operators, cfg.Observers))
+	for range 4 {
+		cfg := queue.cfg
+		cfg.MaxTries = 1
+		cfg.CallTimeout = 2 * time.Second
+		g.privateQueues = append(g.privateQueues, NewQueue(log, cfg))
+	}
+	g.noticeSleep = sleep
 	g.noticeDelay.Store(int64(cfg.NoticeDelay))
 	g.registerHandlers()
 	return g
@@ -178,7 +216,15 @@ func (g *Gateway) SetAccess(operators, observers []int64) {
 func (g *Gateway) Run(ctx context.Context) {
 	a := g.access.Load()
 	g.log.Info("telegram gateway started", slog.Int64("chat_id", g.chatID), slog.Int("operators", len(a.operators)), slog.Int("observers", len(a.observers)))
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); g.runPrivateNotices(ctx) }()
+	for _, q := range g.privateQueues {
+		wg.Add(1)
+		go func() { defer wg.Done(); q.Run(ctx) }()
+	}
 	g.queue.Run(ctx)
+	wg.Wait()
 	close(g.stopped)
 	g.log.Info("telegram gateway stopped")
 }
@@ -235,12 +281,20 @@ func (g *Gateway) iconFor(status domain.Status) Icon {
 // CreateTopic creates a forum topic with the status icon; icon_color is the
 // fallback Telegram applies when no custom emoji id is given.
 func (g *Gateway) CreateTopic(ctx context.Context, name string, status domain.Status) (domain.Topic, error) {
+	return g.CreateTopicAt(ctx, g.chatID, name, status, nil)
+}
+
+func (g *Gateway) CreateTopicAt(ctx context.Context, chatID int64, name string, status domain.Status, guard domain.DispatchGuard) (domain.Topic, error) {
 	icon := g.iconFor(status)
 	name = truncateName(name, topicNameMax)
 	var topic domain.Topic
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	do := g.destinationQueue(chatID).DoGuard
+	if chatID > 0 {
+		do = g.destinationQueue(chatID).DoOnceGuard
+	}
+	err := do(ctx, guard, func(ctx context.Context) error {
 		t, err := g.api.CreateForumTopic(ctx, &bot.CreateForumTopicParams{
-			ChatID:            g.chatID,
+			ChatID:            chatID,
 			Name:              name,
 			IconColor:         icon.Color,
 			IconCustomEmojiID: icon.EmojiID,
@@ -260,7 +314,11 @@ func (g *Gateway) CreateTopic(ctx context.Context, name string, status domain.St
 // EditTopic batches a rename and an icon change into one editForumTopic
 // call and skips the call when the patch changes nothing.
 func (g *Gateway) EditTopic(ctx context.Context, threadID int, patch domain.TopicPatch) error {
-	params := &bot.EditForumTopicParams{ChatID: g.chatID, MessageThreadID: threadID}
+	return g.EditTopicAt(ctx, domain.TopicAddress{ChatID: g.chatID, ThreadID: threadID}, patch, nil)
+}
+
+func (g *Gateway) EditTopicAt(ctx context.Context, address domain.TopicAddress, patch domain.TopicPatch, guard domain.DispatchGuard) error {
+	params := &bot.EditForumTopicParams{ChatID: address.ChatID, MessageThreadID: address.ThreadID}
 	if patch.Name != nil {
 		params.Name = truncateName(*patch.Name, topicNameMax)
 	}
@@ -268,21 +326,21 @@ func (g *Gateway) EditTopic(ctx context.Context, threadID int, patch domain.Topi
 		params.IconCustomEmojiID = g.iconFor(*patch.Status).EmojiID
 	}
 	if params.Name == "" && params.IconCustomEmojiID == "" {
-		g.log.Debug("editForumTopic skipped", slog.Int("thread_id", threadID), slog.Bool("empty_patch", patch.Empty()))
+		g.log.Debug("editForumTopic skipped", slog.Int("thread_id", address.ThreadID), slog.Bool("empty_patch", patch.Empty()))
 		return nil
 	}
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
 		_, err := g.api.EditForumTopic(ctx, params)
 		return translate(err)
 	})
 	if errors.Is(err, ErrTopicNotModified) {
 		// Telegram already holds this name and icon: the desired state is
 		// reached, which is all the caller wants to know.
-		g.log.Debug("editForumTopic already in place", slog.Int("thread_id", threadID))
+		g.log.Debug("editForumTopic already in place", slog.Int("thread_id", address.ThreadID))
 		err = nil
 	}
 	return g.finish("editForumTopic", err,
-		slog.Int("thread_id", threadID),
+		slog.Int("thread_id", address.ThreadID),
 		slog.Int("name_len", utf8.RuneCountInString(params.Name)),
 		slog.String("icon", params.IconCustomEmojiID))
 }
@@ -300,11 +358,15 @@ func (g *Gateway) CloseTopic(ctx context.Context, threadID int) error {
 // the can_delete_messages right for it. A topic that is already gone
 // translates to domain.ErrTopicGone.
 func (g *Gateway) DeleteTopic(ctx context.Context, threadID int) error {
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
-		_, err := g.api.DeleteForumTopic(ctx, &bot.DeleteForumTopicParams{ChatID: g.chatID, MessageThreadID: threadID})
+	return g.DeleteTopicAt(ctx, domain.TopicAddress{ChatID: g.chatID, ThreadID: threadID}, nil)
+}
+
+func (g *Gateway) DeleteTopicAt(ctx context.Context, address domain.TopicAddress, guard domain.DispatchGuard) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
+		_, err := g.api.DeleteForumTopic(ctx, &bot.DeleteForumTopicParams{ChatID: address.ChatID, MessageThreadID: address.ThreadID})
 		return translate(err)
 	})
-	return g.finish("deleteForumTopic", err, slog.Int("thread_id", threadID))
+	return g.finish("deleteForumTopic", err, slog.Int("thread_id", address.ThreadID))
 }
 
 // ReopenTopic reopens a closed topic.
@@ -361,7 +423,7 @@ func (g *Gateway) Rights(ctx context.Context) (domain.Rights, error) {
 // Notify is set. The first failure stops the remaining parts. The id of
 // the last part is returned so the caller can edit its keyboard later.
 func (g *Gateway) Send(ctx context.Context, out domain.Outgoing) (int, error) {
-	return g.send(ctx, g.chatID, out.ThreadID, out)
+	return g.send(ctx, g.chatID, out.ThreadID, out, nil)
 }
 
 // SendDirect posts into the private chat with userID: the same splitting,
@@ -373,7 +435,7 @@ func (g *Gateway) Send(ctx context.Context, out domain.Outgoing) (int, error) {
 func (g *Gateway) SendDirect(ctx context.Context, userID int64, out domain.Outgoing) (int, error) {
 	out.ThreadID = 0
 	out.ReplyTo = 0
-	return g.send(ctx, userID, 0, out)
+	return g.send(ctx, userID, 0, out, nil)
 }
 
 // send is the body shared by Send and SendDirect; chatID is the group or
@@ -382,7 +444,7 @@ func (g *Gateway) SendDirect(ctx context.Context, userID int64, out domain.Outgo
 // split limit reduced by its length so the pair stays under Telegram's
 // cap; a part with more lines than Fold goes out inside an expandable
 // quote, the footer under it.
-func (g *Gateway) send(ctx context.Context, chatID int64, threadID int, out domain.Outgoing) (int, error) {
+func (g *Gateway) send(ctx context.Context, chatID int64, threadID int, out domain.Outgoing, guard domain.DispatchGuard) (int, error) {
 	markdown := out.Markdown && !out.Code && !out.HTML
 	footer := truncateFooter(out.Footer, footerMax)
 	limit := textMax
@@ -438,13 +500,13 @@ func (g *Gateway) send(ctx context.Context, chatID int64, threadID int, out doma
 		case i == len(parts)-1 && out.ForceReply:
 			params.ReplyMarkup = &models.ForceReply{ForceReply: true, Selective: true, InputFieldPlaceholder: forceReplyPlaceholder}
 		}
-		id, err := g.sendPart(ctx, params)
+		id, err := g.sendPart(ctx, params, guard)
 		if err != nil && markdown && isMarkupError(err) {
 			g.log.Warn("markdown rejected, re-sent as pre",
 				slog.Int("thread_id", out.ThreadID), slog.Int("part", i+1), slog.Int("parts", len(parts)),
-				slog.String("html_head", head(body, 200)), slog.Any("err", err))
+				slog.Any("err", err))
 			params.Text = wrap(renderCode(part), folded, partFooter)
-			id, err = g.sendPart(ctx, params)
+			id, err = g.sendPart(ctx, params, guard)
 		}
 		if err != nil {
 			g.log.Warn("sendMessage failed",
@@ -489,9 +551,9 @@ func truncateFooter(footer string, max int) string {
 }
 
 // sendPart sends one message through the queue and returns its id.
-func (g *Gateway) sendPart(ctx context.Context, params *bot.SendMessageParams) (int, error) {
+func (g *Gateway) sendPart(ctx context.Context, params *bot.SendMessageParams, guard domain.DispatchGuard) (int, error) {
 	id := 0
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	err := g.destinationQueue(params.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
 		msg, err := g.api.SendMessage(ctx, params)
 		if err == nil && msg != nil {
 			id = msg.ID
@@ -515,15 +577,6 @@ func capParts(parts []string, max int) ([]string, int, int) {
 	return kept, len(parts) - max, chars
 }
 
-// head returns the first n runes of s, for log lines.
-func head(s string, n int) string {
-	rs := []rune(s)
-	if len(rs) <= n {
-		return s
-	}
-	return string(rs[:n])
-}
-
 // inlineKeyboard renders buttons as an inline keyboard with one button per
 // row, which keeps long option labels readable on a phone.
 func inlineKeyboard(buttons []domain.Button) *models.InlineKeyboardMarkup {
@@ -545,28 +598,33 @@ func inlineKeyboard(buttons []domain.Button) *models.InlineKeyboardMarkup {
 // in one editMessageText call; an empty buttons slice removes the keyboard.
 // "message is not modified" is the state the caller wants.
 func (g *Gateway) EditText(ctx context.Context, messageID int, text string, html bool, buttons []domain.Button) error {
-	if utf8.RuneCountInString(text) > textMax {
-		text = string([]rune(text)[:textMax-1]) + "…"
+	return g.EditTextAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, text, html, buttons, nil)
+}
+
+func (g *Gateway) EditTextAt(ctx context.Context, address domain.MessageAddress, text string, html bool, buttons []domain.Button, guard domain.DispatchGuard) error {
+	if utf16Len(text) > textMax {
+		runes := []rune(text)
+		text = string(runes[:fitUTF16(runes, textMax-1)]) + "…"
 	}
 	params := &bot.EditMessageTextParams{
-		ChatID:      g.chatID,
-		MessageID:   messageID,
+		ChatID:      address.ChatID,
+		MessageID:   address.MessageID,
 		Text:        text,
 		ReplyMarkup: inlineKeyboard(buttons),
 	}
 	if html {
 		params.ParseMode = models.ParseModeHTML
 	}
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
 		_, err := g.api.EditMessageText(ctx, params)
 		return translate(err)
 	})
 	if errors.Is(err, ErrMessageNotModified) {
-		g.log.Debug("editMessageText already in place", slog.Int("message_id", messageID))
+		g.log.Debug("editMessageText already in place", slog.Int("message_id", address.MessageID))
 		err = nil
 	}
 	return g.finish("editMessageText", err,
-		slog.Int("message_id", messageID),
+		slog.Int("message_id", address.MessageID),
 		slog.Int("chars", utf8.RuneCountInString(text)),
 		slog.Int("buttons", len(buttons)))
 }
@@ -575,20 +633,24 @@ func (g *Gateway) EditText(ctx context.Context, messageID int, text string, html
 // an empty slice removes it. Telegram answers "message is not modified"
 // when the keyboard already matches, which is the state the caller wants.
 func (g *Gateway) EditButtons(ctx context.Context, messageID int, buttons []domain.Button) error {
+	return g.EditButtonsAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, buttons, nil)
+}
+
+func (g *Gateway) EditButtonsAt(ctx context.Context, address domain.MessageAddress, buttons []domain.Button, guard domain.DispatchGuard) error {
 	markup := inlineKeyboard(buttons)
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
 		_, err := g.api.EditMessageReplyMarkup(ctx, &bot.EditMessageReplyMarkupParams{
-			ChatID:      g.chatID,
-			MessageID:   messageID,
+			ChatID:      address.ChatID,
+			MessageID:   address.MessageID,
 			ReplyMarkup: markup,
 		})
 		return translate(err)
 	})
 	if errors.Is(err, ErrMessageNotModified) {
-		g.log.Debug("editMessageReplyMarkup already in place", slog.Int("message_id", messageID))
+		g.log.Debug("editMessageReplyMarkup already in place", slog.Int("message_id", address.MessageID))
 		err = nil
 	}
-	return g.finish("editMessageReplyMarkup", err, slog.Int("message_id", messageID), slog.Int("buttons", len(buttons)))
+	return g.finish("editMessageReplyMarkup", err, slog.Int("message_id", address.MessageID), slog.Int("buttons", len(buttons)))
 }
 
 // AnswerButton acknowledges a button press with a short toast. The call
@@ -660,9 +722,13 @@ func downloadErr(err error) string {
 // addresses the General topic. Content type detection is disabled so a
 // .txt stays a plain file instead of being previewed as something else.
 func (g *Gateway) SendDocument(ctx context.Context, doc domain.Document) error {
+	return g.DocumentAt(ctx, domain.TopicAddress{ChatID: g.chatID, ThreadID: doc.ThreadID}, doc, nil)
+}
+
+func (g *Gateway) DocumentAt(ctx context.Context, address domain.TopicAddress, doc domain.Document, guard domain.DispatchGuard) error {
 	params := &bot.SendDocumentParams{
-		ChatID:                      g.chatID,
-		MessageThreadID:             doc.ThreadID,
+		ChatID:                      address.ChatID,
+		MessageThreadID:             address.ThreadID,
 		Document:                    &models.InputFileUpload{Filename: doc.Name, Data: bytes.NewReader(doc.Data)},
 		Caption:                     doc.Caption,
 		DisableNotification:         true,
@@ -671,26 +737,31 @@ func (g *Gateway) SendDocument(ctx context.Context, doc domain.Document) error {
 	if doc.ReplyTo != 0 {
 		params.ReplyParameters = &models.ReplyParameters{MessageID: doc.ReplyTo, AllowSendingWithoutReply: true}
 	}
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
+		params.Document = &models.InputFileUpload{Filename: doc.Name, Data: bytes.NewReader(doc.Data)}
 		_, err := g.api.SendDocument(ctx, params)
 		return translate(err)
 	})
 	if err != nil {
 		g.log.Warn("sendDocument failed",
-			slog.Int("thread_id", doc.ThreadID), slog.String("name", doc.Name), slog.Int("bytes", len(doc.Data)), slog.Any("err", err))
-		return fmt.Errorf("sendDocument thread %d %q: %w", doc.ThreadID, doc.Name, err)
+			slog.Int("thread_id", address.ThreadID), slog.Int("bytes", len(doc.Data)), slog.Any("err", err))
+		return fmt.Errorf("sendDocument thread %d: %w", address.ThreadID, err)
 	}
 	g.log.Debug("sendDocument",
-		slog.Int("thread_id", doc.ThreadID), slog.String("name", doc.Name), slog.Int("bytes", len(doc.Data)),
+		slog.Int("thread_id", address.ThreadID), slog.Int("bytes", len(doc.Data)),
 		slog.Int("reply_to", doc.ReplyTo), slog.Int("caption_len", len(doc.Caption)))
 	return nil
 }
 
 func (g *Gateway) React(ctx context.Context, threadID, messageID int, emoji string) error {
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
+	return g.ReactAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, emoji, nil)
+}
+
+func (g *Gateway) ReactAt(ctx context.Context, address domain.MessageAddress, emoji string, guard domain.DispatchGuard) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
 		_, err := g.api.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
-			ChatID:    g.chatID,
-			MessageID: messageID,
+			ChatID:    address.ChatID,
+			MessageID: address.MessageID,
 			Reaction: []models.ReactionType{{
 				Type:              models.ReactionTypeTypeEmoji,
 				ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
@@ -699,7 +770,7 @@ func (g *Gateway) React(ctx context.Context, threadID, messageID int, emoji stri
 		return translate(err)
 	})
 	return g.finish("setMessageReaction", err,
-		slog.Int("thread_id", threadID), slog.Int("message_id", messageID), slog.String("emoji", emoji))
+		slog.Int("message_id", address.MessageID), slog.String("emoji", emoji))
 }
 
 // ProbeDirect sends a "typing" chat action to the user's private chat:
@@ -717,29 +788,41 @@ func (g *Gateway) ProbeDirect(ctx context.Context, userID int64) error {
 // Telegram still posts a "pinned a message" service message, which the
 // inbound handler deletes like a topic edit notice.
 func (g *Gateway) Pin(ctx context.Context, messageID int) error {
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
-		_, err := g.api.PinChatMessage(ctx, &bot.PinChatMessageParams{ChatID: g.chatID, MessageID: messageID, DisableNotification: true})
+	return g.PinAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, nil)
+}
+
+func (g *Gateway) PinAt(ctx context.Context, address domain.MessageAddress, guard domain.DispatchGuard) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
+		_, err := g.api.PinChatMessage(ctx, &bot.PinChatMessageParams{ChatID: address.ChatID, MessageID: address.MessageID, DisableNotification: true})
 		return translate(err)
 	})
-	return g.finish("pinChatMessage", err, slog.Int("message_id", messageID))
+	return g.finish("pinChatMessage", err, slog.Int("message_id", address.MessageID))
 }
 
 // Unpin removes the pin from one message.
 func (g *Gateway) Unpin(ctx context.Context, messageID int) error {
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
-		_, err := g.api.UnpinChatMessage(ctx, &bot.UnpinChatMessageParams{ChatID: g.chatID, MessageID: messageID})
+	return g.UnpinAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, nil)
+}
+
+func (g *Gateway) UnpinAt(ctx context.Context, address domain.MessageAddress, guard domain.DispatchGuard) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
+		_, err := g.api.UnpinChatMessage(ctx, &bot.UnpinChatMessageParams{ChatID: address.ChatID, MessageID: address.MessageID})
 		return translate(err)
 	})
-	return g.finish("unpinChatMessage", err, slog.Int("message_id", messageID))
+	return g.finish("unpinChatMessage", err, slog.Int("message_id", address.MessageID))
 }
 
 // DeleteMessage deletes one message of the bot in the group.
 func (g *Gateway) DeleteMessage(ctx context.Context, messageID int) error {
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
-		_, err := g.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: g.chatID, MessageID: messageID})
+	return g.DeleteMessageAt(ctx, domain.MessageAddress{ChatID: g.chatID, MessageID: messageID}, nil)
+}
+
+func (g *Gateway) DeleteMessageAt(ctx context.Context, address domain.MessageAddress, guard domain.DispatchGuard) error {
+	err := g.destinationQueue(address.ChatID).DoGuard(ctx, guard, func(ctx context.Context) error {
+		_, err := g.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: address.ChatID, MessageID: address.MessageID})
 		return translate(err)
 	})
-	return g.finish("deleteMessage", err, slog.Int("message_id", messageID))
+	return g.finish("deleteMessage", err, slog.Int("message_id", address.MessageID))
 }
 
 // finish logs the outcome of one call and wraps its error with the method
@@ -751,4 +834,27 @@ func (g *Gateway) finish(method string, err error, attrs ...any) error {
 	}
 	g.log.Debug(method, attrs...)
 	return nil
+}
+
+func (g *Gateway) SendAt(ctx context.Context, address domain.TopicAddress, out domain.Outgoing, guard domain.DispatchGuard) (int, error) {
+	if address.ChatID == 0 || address.ThreadID < 0 {
+		return 0, errors.New("invalid Telegram destination")
+	}
+	out.ThreadID = address.ThreadID
+	return g.send(ctx, address.ChatID, address.ThreadID, out, guard)
+}
+
+var _ domain.DestinationTelegram = (*Gateway)(nil)
+
+// ConnectedBotID is the getMe identity verified before polling began.
+func (g *Gateway) ConnectedBotID() int64 { return g.botID }
+
+// Private lanes have bounded calls and no automatic retries, so one blocked
+// recipient cannot occupy the owner queue during Telegram flood control.
+func (g *Gateway) destinationQueue(chat any) *Queue {
+	id, ok := chat.(int64)
+	if !ok || id == g.chatID || id <= 0 || len(g.privateQueues) == 0 {
+		return g.queue
+	}
+	return g.privateQueues[uint64(id)%uint64(len(g.privateQueues))]
 }

@@ -39,8 +39,8 @@ func TestCheck(t *testing.T) {
 	if got := api.methods(); strings.Join(got, ",") != "getMe,deleteWebhook" {
 		t.Errorf("calls = %v", got)
 	}
-	if got := api.callsOf("deleteWebhook")[0].form.Get("drop_pending_updates"); got != "true" {
-		t.Errorf("drop_pending_updates = %q, want true", got)
+	if got := api.callsOf("deleteWebhook")[0].form.Get("drop_pending_updates"); got == "true" {
+		t.Errorf("drop_pending_updates = %q, want retained updates", got)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "bot_id=1") || !strings.Contains(out, "username=herdr_agents_bot") {
@@ -176,8 +176,8 @@ func TestRegisterCommands(t *testing.T) {
 			t.Errorf("commands lack %s: %s", name, cmds)
 		}
 	}
-	if n := strings.Count(cmds, `"command":`); n != 18 {
-		t.Errorf("commands count = %d, want 18: %s", n, cmds)
+	if n := strings.Count(cmds, `"command":`); n != 20 {
+		t.Errorf("commands count = %d, want 20: %s", n, cmds)
 	}
 	if scope := f.Get("scope"); !strings.Contains(scope, `"type":"chat"`) || !strings.Contains(scope, `"chat_id":-1001234567890`) {
 		t.Errorf("scope = %q", scope)
@@ -196,5 +196,31 @@ func TestRegisterCommandsFailureIsReturned(t *testing.T) {
 	}
 	if !strings.Contains(h.buf.String(), "setMyCommands failed") {
 		t.Errorf("failure not logged: %s", h.buf.String())
+	}
+}
+
+func TestCheckPrivateTopicsOptional(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		api := newFakeAPI(t)
+		api.on("getMe", func(url.Values) apiReply {
+			return okReply(map[string]any{"id": 42, "is_bot": true, "has_topics_enabled": enabled})
+		})
+		id, err := telegram.Check(ctxT(t), api.bot(t, nil, nil), nil)
+		if err != nil || id.PrivateTopicsReady() != enabled {
+			t.Fatalf("enabled=%v: %+v, %v", enabled, id, err)
+		}
+	}
+}
+
+func TestGatewayRefreshPrivateTopics(t *testing.T) {
+	h := newHarness(t)
+	for _, enabled := range []bool{false, true, false} {
+		h.api.on("getMe", func(url.Values) apiReply {
+			return okReply(map[string]any{"id": 42, "is_bot": true, "has_topics_enabled": enabled})
+		})
+		id, err := h.gw.Identity(h.ctx)
+		if err != nil || id.PrivateTopicsReady() != enabled {
+			t.Fatalf("enabled=%v: %+v, %v", enabled, id, err)
+		}
 	}
 }

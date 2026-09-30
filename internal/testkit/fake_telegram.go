@@ -43,23 +43,24 @@ import (
 // remembered for Icons; IconPack answers with the slice given to
 // SetIconPack (by default the six defaults plus 🔥 🤖 🧠).
 type FakeTelegram struct {
-	mu        sync.Mutex
-	topics    map[int]*domain.Topic
-	nextID    int
-	nextMsgID int
-	calls     []string
-	settings  []string
-	sent      []domain.Outgoing
-	direct    []domain.Outgoing
-	pinned    map[int]bool
-	buttons   map[int][]domain.Button
-	texts     map[int]string
-	icons     domain.StatusIcons
-	operators []int64
-	observers []int64
-	pack      []string
-	docs      []domain.Document
-	files     map[string][]byte
+	destinations map[int64]*FakeTelegram
+	mu           sync.Mutex
+	topics       map[int]*domain.Topic
+	nextID       int
+	nextMsgID    int
+	calls        []string
+	settings     []string
+	sent         []domain.Outgoing
+	direct       []domain.Outgoing
+	pinned       map[int]bool
+	buttons      map[int][]domain.Button
+	texts        map[int]string
+	icons        domain.StatusIcons
+	operators    []int64
+	observers    []int64
+	pack         []string
+	docs         []domain.Document
+	files        map[string][]byte
 	// downloadDelay makes Download sleep that long (real time) so tests
 	// can see that a download does not stall the bridge loop.
 	downloadDelay time.Duration

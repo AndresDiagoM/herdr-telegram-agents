@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/permgps/herdr-telegram-agents/internal/domain"
 )
 
 // queueBuffer bounds how many calls may wait in the queue before Do blocks.
@@ -17,6 +19,7 @@ var errQueueStopped = errors.New("telegram queue stopped")
 // QueueConfig tunes the serial call queue. Zero fields take the defaults
 // from DefaultQueueConfig; Now and Sleep are injectable for tests.
 type QueueConfig struct {
+	CallTimeout time.Duration // optional total budget, including queue wait
 	MinGap      time.Duration // minimum spacing between any two API calls
 	WindowLimit int           // at most this many calls per Window
 	Window      time.Duration // sliding window for WindowLimit
@@ -121,6 +124,11 @@ func (q *Queue) Len() int { return len(q.jobs) }
 // caller gives up while the call is queued or running, and errQueueStopped
 // once Run has exited.
 func (q *Queue) Do(ctx context.Context, op func(context.Context) error) error {
+	if q.cfg.CallTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, q.cfg.CallTimeout)
+		defer cancel()
+	}
 	done := make(chan error, 1)
 	j := job{ctx: ctx, op: op, done: done, enqueued: q.cfg.Now()}
 	select {
@@ -138,6 +146,22 @@ func (q *Queue) Do(ctx context.Context, op func(context.Context) error) error {
 	case <-q.stopped:
 		return fmt.Errorf("%w: %w", errQueueStopped, q.stopErr)
 	}
+}
+
+// DoGuard reauthorizes inside every queued attempt, after pacing and retry
+// waits. No policy lock is held while the network operation runs.
+func (q *Queue) DoGuard(ctx context.Context, guard domain.DispatchGuard, op func(context.Context) error) error {
+	return q.Do(ctx, func(ctx context.Context) error {
+		if guard == nil {
+			return op(ctx)
+		}
+		callCtx, release, err := guard(ctx)
+		if err != nil {
+			return noRetryError{err}
+		}
+		defer release()
+		return op(callCtx)
+	})
 }
 
 // Run executes queued calls until runCtx ends. Calls still waiting when it
@@ -278,4 +302,20 @@ func (q *Queue) stamp() {
 	}
 	q.stamps[(q.head+q.count)%len(q.stamps)] = q.cfg.Now()
 	q.count++
+}
+
+// noRetryError preserves the classified error but prevents replay of an
+// operation whose first network outcome may already have created an object.
+type noRetryError struct{ error }
+
+func (e noRetryError) Unwrap() error { return e.error }
+
+func (q *Queue) DoOnceGuard(ctx context.Context, guard domain.DispatchGuard, op func(context.Context) error) error {
+	return q.DoGuard(ctx, guard, func(ctx context.Context) error {
+		err := op(ctx)
+		if err != nil {
+			return noRetryError{err}
+		}
+		return nil
+	})
 }

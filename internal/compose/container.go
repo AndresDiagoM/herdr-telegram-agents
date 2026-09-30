@@ -339,5 +339,39 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 	presence := app.NewPresence(system.NewIdleSource(log), opts, clock, log)
 	d = app.NewDaemon(cfg, hg, tg, registry, reconciler, bridge, capture, state.NewConfigStore(env.ConfigDir, log), opts, presence, clock, log)
 	d.SetInbox(inbox)
+	d.Sharing = app.NewSharing(ctx, state.NewSharingStore(env.StateDir, log), log)
+	d.Sharing.BotID = tg.ConnectedBotID()
+	d.Sharing.Agent = registry.Agent
+	d.Sharing.Now = clock.Now
+	privateTelegram := app.PrivateRedactor{DestinationTelegram: tg, Redactor: domain.NewRedactor(cfg.BotToken)}
+	bridge.PrivateBusy = tg.PrivateBusy
+	bridge.Shares = &app.SharePanel{Sharing: d.Sharing, Capability: &app.PrivateCapability{Source: tg, Log: log}, Telegram: tg, Private: privateTelegram, Config: cfg, Agent: registry.Agent, KeyForThread: reconciler.KeyForThread, Now: clock.Now}
+	privateReconciler := &app.PrivateReconciler{Automatic: opts.SyncEnabled, Sharing: d.Sharing, Telegram: privateTelegram, Agent: registry.Agent, Now: clock.Now, Log: log}
+	bridge.Shares.OnGrant = privateReconciler.Grant
+	bridge.PrivateReconciler = privateReconciler
+	bridge.SetPrivateControl(&app.PrivateControl{Sharing: d.Sharing, Telegram: privateTelegram, Transport: tg, Herdr: hg, Git: system.NewGitRunner(log), Inbox: inbox, Agent: registry.Agent, Now: clock.Now})
+
+	privateOutput := &app.PrivateOutput{Control: bridge.PrivateControl, Capture: capture, ExactReplies: transcript.NewOpenCodeReader(hg.AgentSession, system.NewOpenCodeExporter(log).Export, log), Automatic: opts.SyncEnabled}
+	bridge.PrivateControl.Output = privateOutput
+	bridge.PrivateControl.Read = privateOutput.Read
+	privateDashboard := app.NewPrivateDashboard(bridge.PrivateControl, privateReconciler, cfg.BotUsername, tg)
+	bridge.PrivateControl.Dashboard = privateDashboard
+	bridge.PrivateControl.Overview = privateDashboard.Handle
+	bridge.Shares.OnGrant = func(ctx context.Context, g domain.ShareGrant) error {
+		if err := privateReconciler.Grant(ctx, g); err != nil {
+			return err
+		}
+		return privateDashboard.Refresh(ctx, g.RecipientID, true)
+	}
+	tg.SetPrivateRegistration(func(ctx context.Context, c domain.PrivateContact) (bool, error) {
+		if _, enabled := d.Sharing.Snapshot(); !enabled {
+			return false, nil
+		}
+		first, err := d.Sharing.Register(ctx, c.ActorID, c.ChatID, c.Name, c.Username, c.At)
+		if err == nil {
+			d.Sharing.ObserveUpdate(c.UpdateID)
+		}
+		return first, err
+	})
 	return d, run, closeAll, nil
 }

@@ -133,3 +133,21 @@ func TestInspectorSendTestFails(t *testing.T) {
 		t.Fatalf("SendTest err = %v", err)
 	}
 }
+
+func TestInspectorRefreshPrivateTopics(t *testing.T) {
+	insp, api := newInspector(t)
+	for _, enabled := range []bool{false, true, false} {
+		api.on("getMe", func(url.Values) apiReply {
+			return okReply(map[string]any{"id": 42, "is_bot": true, "has_topics_enabled": enabled})
+		})
+		id, err := insp.Identity(ctxT(t))
+		if err != nil || id.PrivateTopicsReady() != enabled {
+			t.Fatalf("private topics enabled=%v: identity=%+v err=%v", enabled, id, err)
+		}
+	}
+	api.on("getMe", func(url.Values) apiReply { return errReply(503, "Unavailable") })
+	id, err := insp.Identity(ctxT(t))
+	if err == nil || id.PrivateTopicsReady() {
+		t.Fatalf("failed probe retained permission: %+v, %v", id, err)
+	}
+}

@@ -53,6 +53,9 @@ type HerdrEvent struct {
 // TopicMessage is a text message written by an operator inside a topic.
 // MessageID lets the application react to or reply to that message.
 type TopicMessage struct {
+	ChatID    int64
+	UpdateID  int64
+	SentAt    time.Time
 	ThreadID  int
 	MessageID int
 	FromID    int64
@@ -77,6 +80,9 @@ const (
 // is the declared type, may be empty; Size is Telegram's file_size, 0 when
 // unknown; Caption is the text under the file.
 type TopicAttachment struct {
+	ChatID    int64
+	UpdateID  int64
+	SentAt    time.Time
 	ThreadID  int
 	MessageID int
 	FromID    int64
@@ -93,6 +99,9 @@ type TopicAttachment struct {
 // a bot message in a topic. CallbackID answers the press; MessageID names
 // the message carrying the keyboard; Data is the button's Data.
 type ButtonPressed struct {
+	ChatID     int64
+	UpdateID   int64
+	SentAt     time.Time
 	CallbackID string
 	ThreadID   int
 	MessageID  int
@@ -105,6 +114,9 @@ type ButtonPressed struct {
 // from General; Role says who wrote it, so the application decides which
 // commands an observer may use.
 type GeneralCommand struct {
+	ChatID    int64
+	UpdateID  int64
+	SentAt    time.Time
 	MessageID int
 	FromID    int64
 	Text      string
@@ -126,17 +138,26 @@ type StrangerSeen struct {
 
 // TopicRenamed is emitted when someone renames a topic in Telegram.
 type TopicRenamed struct {
+	ChatID   int64
+	UpdateID int64
+	SentAt   time.Time
 	ThreadID int
 	Name     string
 }
 
 // TopicClosed is emitted when someone closes a topic in Telegram.
 type TopicClosed struct {
+	ChatID   int64
+	UpdateID int64
+	SentAt   time.Time
 	ThreadID int
 }
 
 // TopicReopened is emitted when someone reopens a topic in Telegram.
 type TopicReopened struct {
+	ChatID   int64
+	UpdateID int64
+	SentAt   time.Time
 	ThreadID int
 }
 
@@ -155,3 +176,39 @@ func (TopicClosed) isEvent()     {}
 func (TopicReopened) isEvent()   {}
 func (RightsChanged) isEvent()   {}
 func (StrangerSeen) isEvent()    {}
+
+// PrivateContact is metadata for a genuine human private message. Persistence
+// runs before the polling response is released to Telegram's update consumer.
+type PrivateContact struct {
+	UpdateID int64
+	ActorID  int64
+	ChatID   int64
+	Name     string
+	Username string
+	At       time.Time
+}
+
+// PrivateMessage is routed exclusively through sharing authorization. It must
+// never enter owner routing even if ActorID is a configured operator.
+type PrivateMessage struct {
+	FirstContact bool
+	Contact      PrivateContact
+	Address      TopicAddress
+	MessageID    int
+	Text         string
+	Attachment   *TopicAttachment
+	CallbackID   string
+	CallbackData string
+	SentAt       time.Time
+	Stale        bool
+}
+
+func (PrivateMessage) isEvent() {}
+
+// PrivateReachability affects existing contacts only and grants no access.
+type PrivateReachability struct {
+	RecipientID int64
+	Unavailable bool
+}
+
+func (PrivateReachability) isEvent() {}
