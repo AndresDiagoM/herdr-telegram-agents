@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -24,11 +23,21 @@ const (
 	kindCodex = "codex"
 	// codexWalkLimitDefault is the value of codexWalkLimit.
 	codexWalkLimitDefault = 50000
+	// codexReadBatch is how many directory entries are read at a time.
+	codexReadBatch = 256
+	// codexMetaMax bounds the first record, read to check whose rollout a
+	// file is. Codex's session_meta is a few tens of KB.
+	codexMetaMax = 1 << 20
+	// codexLaterDays is how many days after its creation a thread's later
+	// rollout files are looked for.
+	codexLaterDays = 366
+	// codexHeadBlock is how much of the rollout's head is read at a time.
+	codexHeadBlock = 32 << 10
 )
 
-// codexWalkLimit caps the directory entries visited by the fallback search
-// for a rollout file, so a huge sessions tree costs a screen post and not
-// a long walk. A variable so a test can lower it.
+// codexWalkLimit caps the directory entries visited by the search for a
+// rollout file, the day-directory shortcut included, so a huge sessions tree
+// or directory costs a screen post and not a long walk. A variable so a test can lower it.
 var codexWalkLimit = codexWalkLimitDefault
 
 // codexHomeDir is Codex's data directory, relative to the user's home.
@@ -126,19 +135,22 @@ func (r *CodexReader) LastReply(ctx context.Context, agent domain.Agent) (domain
 	if err != nil {
 		return domain.Reply{}, fmt.Errorf("%w: no home directory", domain.ErrNoReply)
 	}
-	path, err := findCodexRollout(ctx, filepath.Join(home, codexHomeDir, "sessions"), id)
+	// The sessions directory itself may be a link (the user's choice); the
+	// lookup below can never leave it.
+	sessions, err := os.OpenRoot(filepath.Join(home, codexHomeDir, "sessions"))
+	if err != nil {
+		return domain.Reply{}, fmt.Errorf("%w: no rollout file for the codex session", domain.ErrNoReply)
+	}
+	defer sessions.Close()
+	rel, seen, err := findCodexRollout(ctx, sessions, id, r.now())
 	if err != nil {
 		return domain.Reply{}, err
 	}
-	f, err := os.Open(path)
+	f, info, err := openCodexRollout(sessions, rel, seen, id)
 	if err != nil {
-		return domain.Reply{}, fmt.Errorf("%w: rollout could not be opened", domain.ErrNoReply)
+		return domain.Reply{}, err
 	}
 	defer f.Close()
-	info, err := f.Stat()
-	if err != nil {
-		return domain.Reply{}, fmt.Errorf("%w: rollout could not be read", domain.ErrNoReply)
-	}
 	text, meta, stats, err := codexLastReplyFrom(f, info.Size(), r.maxScan)
 	if err != nil {
 		return domain.Reply{}, err
@@ -168,70 +180,214 @@ func classifyCodexError(ctx context.Context, err error, category string) error {
 	return fmt.Errorf("%w: %s", domain.ErrNoReply, category)
 }
 
-// findCodexRollout returns the rollout file of thread id under root. Codex
-// names it rollout-<local time>-<id>.jsonl inside the day directory of the
-// thread's creation, and thread ids are UUIDv7, whose first 48 bits are
-// that creation time in milliseconds: the days around it (in UTC and in
-// local time, the file name's zone) are tried first, then the whole tree.
-// Only a regular file whose name ends in exactly "-<id>.jsonl" matches, so
-// a helper thread that shares an id prefix, or a symlink, never does.
-func findCodexRollout(ctx context.Context, root, id string) (string, error) {
-	suffix := "-" + id + ".jsonl"
-	matches := func(e fs.DirEntry) bool {
-		name := e.Name()
-		return e.Type().IsRegular() && strings.HasPrefix(name, "rollout-") && strings.HasSuffix(name, suffix)
+// codexRollout is a rollout file of the thread found under the sessions root.
+type codexRollout struct {
+	rel   string // path below the sessions root
+	stamp string // the file name's timestamp, fixed width so it sorts as text
+	rid   string // the rollout id: the thread id unless the thread was reverted
+}
+
+func (c codexRollout) newerThan(o codexRollout) bool {
+	return c.stamp > o.stamp || c.stamp == o.stamp && c.rid > o.rid
+}
+
+const codexStampLen = len("2006-01-02T15-04-05")
+
+var codexStamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}$`)
+
+// codexRolloutName parses rollout-<local time>-<thread id>[_<rollout id>].jsonl
+// for thread id. Codex adds the second id when it reverts a thread: the
+// thread keeps its id but continues in a new file, and the old file stays.
+func codexRolloutName(name, id string) (stamp, rid string, ok bool) {
+	core, ok := strings.CutPrefix(name, "rollout-")
+	if !ok {
+		return "", "", false
 	}
-	for _, dir := range codexDayDirs(root, id) {
-		entries, err := os.ReadDir(dir)
-		if err != nil {
-			continue
+	core, ok = strings.CutSuffix(core, ".jsonl")
+	if !ok || len(core) < codexStampLen+1 || core[codexStampLen] != '-' || !codexStamp.MatchString(core[:codexStampLen]) {
+		return "", "", false
+	}
+	thread, rollout, reverted := strings.Cut(core[codexStampLen+1:], "_")
+	if thread != id || reverted && !codexThreadID.MatchString(rollout) {
+		return "", "", false
+	}
+	if !reverted {
+		rollout = thread
+	}
+	return core[:codexStampLen], rollout, true
+}
+
+// codexSearch looks for the rollout files of one thread. Its entry budget is
+// shared by the day-directory shortcut and the tree walk, and directories are
+// read in batches so that neither the budget nor a cancellation waits for a
+// huge directory to load.
+type codexSearch struct {
+	ctx  context.Context
+	root *os.Root
+	id   string
+	left int
+	best *codexRollout
+}
+
+// scan reads dir, a path below the root, and offers every rollout file of the
+// thread in it; with deep it goes into subdirectories too. Links are never
+// followed: a directory entry that is not itself a directory or a regular
+// file is ignored, and root refuses any path that leaves the tree.
+func (s *codexSearch) scan(dir string, deep bool) error {
+	d, err := s.root.Open(dir)
+	if err != nil {
+		return nil // absent or refused: nothing to find here
+	}
+	defer d.Close()
+	for {
+		if err := s.ctx.Err(); err != nil {
+			return err
 		}
+		entries, readErr := d.ReadDir(codexReadBatch)
 		for _, e := range entries {
-			if matches(e) {
-				return filepath.Join(dir, e.Name()), nil
+			if s.left--; s.left < 0 {
+				return errCodexWalkLimit
 			}
+			switch {
+			case e.Type().IsRegular():
+				s.offer(dir, e.Name())
+			case deep && e.IsDir():
+				if err := s.scan(filepath.Join(dir, e.Name()), true); err != nil {
+					return err
+				}
+			}
+		}
+		if readErr != nil {
+			return nil // io.EOF, or a directory that stopped being readable
 		}
 	}
-	visited := 0
-	found := ""
-	err := filepath.WalkDir(root, func(path string, e fs.DirEntry, err error) error {
-		if err != nil {
-			if path == root {
-				return err
-			}
-			return nil
+}
+
+func (s *codexSearch) offer(dir, name string) {
+	stamp, rid, ok := codexRolloutName(name, s.id)
+	if !ok {
+		return
+	}
+	c := codexRollout{rel: filepath.Join(dir, name), stamp: stamp, rid: rid}
+	if s.best == nil || c.newerThan(*s.best) {
+		s.best = &c
+	}
+}
+
+// findCodexRollout returns the path, below root, of the newest rollout file of
+// thread id. Codex names it rollout-<local time>-<id>.jsonl inside the day
+// directory of the thread's creation, and thread ids are UUIDv7, whose first
+// 48 bits are that creation time in milliseconds: the days around it (in UTC
+// and in local time, the file name's zone) and the days after it, up to now,
+// are read first, then the whole tree if none of them holds a file. Only a regular file whose name carries exactly the thread id matches,
+// so a helper thread that shares an id prefix, or a link, never does.
+//
+// A reverted thread has several files, the later ones in the day directory of
+// the revert, and Codex uses the newest: so does the reader, among all the
+// days it reads. Reading them all costs the entries of those days, against
+// the same budget as the rest of the search; when the budget runs out the
+// search fails rather than answer from a file that may not be the newest.
+//
+// It also returns what the file looked like at that moment, for
+// openCodexRollout to compare with what it opens.
+func findCodexRollout(ctx context.Context, root *os.Root, id string, now time.Time) (string, os.FileInfo, error) {
+	s := &codexSearch{ctx: ctx, root: root, id: id, left: codexWalkLimit}
+	var err error
+	for _, dir := range codexDayDirs(id, now) {
+		if err = s.scan(dir, false); err != nil {
+			break
 		}
-		if visited++; visited > codexWalkLimit {
-			return errCodexWalkLimit
-		}
-		if visited%256 == 0 {
-			if cerr := ctx.Err(); cerr != nil {
-				return cerr
-			}
-		}
-		if matches(e) {
-			found = path
-			return fs.SkipAll
-		}
-		return nil
-	})
+	}
+	if err == nil && s.best == nil {
+		err = s.scan(".", true)
+	}
 	switch {
-	case found != "":
-		return found, nil
+	case err == nil && s.best != nil:
+		seen, lerr := root.Lstat(s.best.rel)
+		if lerr != nil || !seen.Mode().IsRegular() {
+			return "", nil, fmt.Errorf("%w: rollout could not be opened", domain.ErrNoReply)
+		}
+		return s.best.rel, seen, nil
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-		return "", err
+		return "", nil, err
 	case errors.Is(err, errCodexWalkLimit):
-		return "", fmt.Errorf("%w: too many session files to search", domain.ErrNoReply)
+		return "", nil, fmt.Errorf("%w: too many session files to search", domain.ErrNoReply)
 	}
-	return "", fmt.Errorf("%w: no rollout file for the codex session", domain.ErrNoReply)
+	return "", nil, fmt.Errorf("%w: no rollout file for the codex session", domain.ErrNoReply)
 }
 
 var errCodexWalkLimit = errors.New("codex sessions walk limit")
 
+// openCodexRollout opens the file the search chose and checks it is the one
+// the search saw (seen) and that it is the thread's: a regular file, the same
+// file as at lookup time, and whose first record is the session_meta of
+// thread id. The name alone does not say whose rollout a file is.
+func openCodexRollout(root *os.Root, rel string, seen os.FileInfo, id string) (*os.File, os.FileInfo, error) {
+	f, err := root.Open(rel)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%w: rollout could not be opened", domain.ErrNoReply)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, fmt.Errorf("%w: rollout could not be read", domain.ErrNoReply)
+	}
+	if !info.Mode().IsRegular() || !os.SameFile(seen, info) {
+		f.Close()
+		return nil, nil, fmt.Errorf("%w: rollout changed while it was opened", domain.ErrNoReply)
+	}
+	if err := codexCheckThread(codexReadAt{f}, info.Size(), id); err != nil {
+		f.Close()
+		return nil, nil, err
+	}
+	return f, info, nil
+}
+
+// codexCheckThread requires the rollout's first record to be the session_meta
+// of thread id. Codex writes it first in every rollout, and its id is the
+// thread's own (a reverted thread's new file keeps it).
+func codexCheckThread(f io.ReaderAt, size int64, id string) error {
+	var head []byte
+	for off := int64(0); off < min(size, codexMetaMax+1) && !bytes.Contains(head, []byte{'\n'}); {
+		block := make([]byte, min(size-off, codexHeadBlock))
+		n, err := f.ReadAt(block, off)
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("%w: the rollout could not be read", domain.ErrNoReply)
+		}
+		if n == 0 {
+			break
+		}
+		head = append(head, block[:n]...)
+		off += int64(n)
+	}
+	line, _, found := bytes.Cut(head, []byte{'\n'})
+	if !found && len(head) > codexMetaMax {
+		return fmt.Errorf("%w: the rollout's first record is too long", domain.ErrNoReply)
+	}
+	if found && len(line) > codexMetaMax {
+		return fmt.Errorf("%w: the rollout's first record is too long", domain.ErrNoReply)
+	}
+	var rec struct {
+		Type    string `json:"type"`
+		Payload struct {
+			ID string `json:"id"`
+		} `json:"payload"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(line), &rec) != nil || rec.Type != "session_meta" {
+		return fmt.Errorf("%w: the rollout does not start with its session metadata", domain.ErrNoReply)
+	}
+	if !strings.EqualFold(rec.Payload.ID, id) {
+		return fmt.Errorf("%w: the rollout belongs to another session", domain.ErrNoReply)
+	}
+	return nil
+}
+
 // codexDayDirs lists the session day directories worth trying first for
-// thread id: the days around the UUIDv7 creation time, UTC and local.
-// A UUID that is not version 7 yields none.
-func codexDayDirs(root, id string) []string {
+// thread id, as paths below the sessions root: the days around the UUIDv7
+// creation time, UTC and local, then every later day up to until, where a
+// reverted thread continues in a new file. A UUID that is not version 7
+// yields none.
+func codexDayDirs(id string, until time.Time) []string {
 	raw, err := hex.DecodeString(strings.ReplaceAll(id[:13], "-", ""))
 	if err != nil || len(raw) != 6 || id[14] != '7' {
 		return nil
@@ -243,15 +399,25 @@ func codexDayDirs(root, id string) []string {
 	created := time.UnixMilli(ms)
 	seen := map[string]bool{}
 	var dirs []string
-	for _, loc := range []*time.Location{time.UTC, time.Local} {
-		for _, shift := range []int{0, -1, 1} {
-			d := created.In(loc).AddDate(0, 0, shift)
-			dir := filepath.Join(root, d.Format("2006"), d.Format("01"), d.Format("02"))
+	add := func(t time.Time) {
+		for _, loc := range []*time.Location{time.UTC, time.Local} {
+			d := t.In(loc)
+			dir := filepath.Join(d.Format("2006"), d.Format("01"), d.Format("02"))
 			if !seen[dir] {
 				seen[dir] = true
 				dirs = append(dirs, dir)
 			}
 		}
+	}
+	for _, shift := range []int{0, -1, 1} {
+		add(created.AddDate(0, 0, shift))
+	}
+	for days := 2; days <= codexLaterDays; days++ {
+		day := created.AddDate(0, 0, days)
+		if day.After(until.AddDate(0, 0, 1)) {
+			break
+		}
+		add(day)
 	}
 	return dirs
 }

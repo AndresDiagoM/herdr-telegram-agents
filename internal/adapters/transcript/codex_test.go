@@ -78,6 +78,7 @@ type codexFixture struct {
 	digest string
 	logBuf bytes.Buffer
 	homed  int
+	clock  time.Time // the reader's now; zero means just after the test turn
 }
 
 func newCodexFixture(t *testing.T) *codexFixture {
@@ -87,11 +88,11 @@ func newCodexFixture(t *testing.T) *codexFixture {
 
 // rolloutDir is the day directory Codex would use for id.
 func (f *codexFixture) rolloutDir(id string) string {
-	dirs := codexDayDirs(filepath.Join(f.home, ".codex", "sessions"), id)
+	dirs := codexDayDirs(id, time.Time{})
 	if len(dirs) == 0 {
 		f.t.Fatalf("no day directory for %s", id)
 	}
-	return dirs[0]
+	return filepath.Join(f.home, ".codex", "sessions", dirs[0])
 }
 
 // write puts a rollout for id under its day directory.
@@ -100,12 +101,24 @@ func (f *codexFixture) write(id string, lines ...string) string {
 	return f.writeIn(f.rolloutDir(id), id, lines...)
 }
 
+// codexMeta is the session_meta record Codex writes first in every rollout.
+func codexMeta(id string) string {
+	return codexLine("session_meta", map[string]any{"id": id, "session_id": id, "cwd": "/work", "originator": "codex-tui", "cli_version": "0.155.1"})
+}
+
+// writeIn puts a rollout for id in dir, opened by its session_meta.
 func (f *codexFixture) writeIn(dir, id string, lines ...string) string {
+	f.t.Helper()
+	return f.writeNamed(dir, "rollout-2026-09-26T09-59-58-"+id+".jsonl", append([]string{codexMeta(id)}, lines...)...)
+}
+
+// writeNamed puts exactly lines in the file called name, with no session_meta.
+func (f *codexFixture) writeNamed(dir, name string, lines ...string) string {
 	f.t.Helper()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		f.t.Fatal(err)
 	}
-	path := filepath.Join(dir, "rollout-2026-09-26T09-59-58-"+id+".jsonl")
+	path := filepath.Join(dir, name)
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
 		f.t.Fatal(err)
 	}
@@ -115,7 +128,13 @@ func (f *codexFixture) writeIn(dir, id string, lines ...string) string {
 func (f *codexFixture) reader() *CodexReader {
 	session := func(context.Context, string) (domain.SessionTuple, error) { return f.tuple, nil }
 	home := func() (string, error) { f.homed++; return f.home, nil }
-	r := newCodexReader(session, home, func() time.Time { return time.Unix(codexT1+5, 0) },
+	now := func() time.Time {
+		if f.clock.IsZero() {
+			return time.Unix(codexT1+5, 0)
+		}
+		return f.clock
+	}
+	r := newCodexReader(session, home, now,
 		slog.New(slog.NewJSONHandler(&f.logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	return r
 }
@@ -190,9 +209,10 @@ func TestCodexNestedTurnStartDoesNotEndTheWalk(t *testing.T) {
 // turn runs.
 func TestCodexUnreadableNewestBoundary(t *testing.T) {
 	half := codexStarted("turn-b")
+	meta := codexMeta(codexTestID) + "\n"
 	cases := map[string]string{
-		"half-written last line": strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + half[:len(half)/2],
-		"changed field type":     strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + strings.Replace(codexStarted("turn-b"), `"started_at":1790000000`, `"started_at":1790000100.5`, 1) + "\n",
+		"half-written last line": meta + strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + half[:len(half)/2],
+		"changed field type":     meta + strings.Join(codexTurn("turn-a", "m", "OLD ANSWER", 1), "\n") + "\n" + strings.Replace(codexStarted("turn-b"), `"started_at":1790000000`, `"started_at":1790000100.5`, 1) + "\n",
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -544,10 +564,10 @@ func TestCodexReadFailureNamesNothing(t *testing.T) {
 }
 
 func TestCodexDayDirs(t *testing.T) {
-	if dirs := codexDayDirs("root", "01a0de3a-aaaa-4aaa-8aaa-aaaaaaaaaaaa"); dirs != nil {
+	if dirs := codexDayDirs("01a0de3a-aaaa-4aaa-8aaa-aaaaaaaaaaaa", time.Time{}); dirs != nil {
 		t.Fatalf("a version 4 uuid must not guess day directories: %v", dirs)
 	}
-	dirs := codexDayDirs("root", codexTestID)
+	dirs := codexDayDirs(codexTestID, time.Time{})
 	if len(dirs) < 3 {
 		t.Fatalf("dirs = %v, want the creation day and its neighbours", dirs)
 	}
@@ -557,5 +577,29 @@ func TestCodexDayDirs(t *testing.T) {
 			t.Fatalf("duplicate day directory %s", d)
 		}
 		seen[d] = true
+	}
+}
+
+// TestCodexDayDirsRunToNow covers the days after the creation day: they are
+// listed up to the reader's clock, once each, and not beyond a year.
+func TestCodexDayDirsRunToNow(t *testing.T) {
+	created := time.UnixMilli(1790434781866) // the test thread's creation
+	until := created.AddDate(0, 0, 5)
+	dirs := codexDayDirs(codexTestID, until)
+	seen := map[string]bool{}
+	for _, d := range dirs {
+		if seen[d] {
+			t.Fatalf("duplicate day directory %s", d)
+		}
+		seen[d] = true
+	}
+	for _, shift := range []int{-1, 0, 1, 2, 3, 4, 5} {
+		d := created.UTC().AddDate(0, 0, shift)
+		if want := filepath.Join(d.Format("2006"), d.Format("01"), d.Format("02")); !seen[want] {
+			t.Errorf("day %s (creation %+d) missing from %v", want, shift, dirs)
+		}
+	}
+	if far := codexDayDirs(codexTestID, created.AddDate(5, 0, 0)); len(far) > 2*(codexLaterDays+3) {
+		t.Fatalf("%d day directories, want at most a year's", len(far))
 	}
 }

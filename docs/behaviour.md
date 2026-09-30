@@ -243,8 +243,18 @@ option of the Posts group:
   For Codex, the daemon asks Herdr for the pane's `agent_session` at read time
   and opens exactly that thread's rollout file,
   `~/.codex/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl` (the day
-  directory of the thread's creation; the thread id must be a UUID and the file
-  a regular file, never a symlink). It reads the file from the end, within the
+  directory of the thread's creation; the thread id must be a UUID). The
+  lookup never leaves the sessions directory (a link that points out of it is
+  refused, and the walk does not descend into links), and the file must be a
+  regular file whose first record is the `session_meta` of that thread, so a
+  file that only carries the thread id in its name is refused. The search
+  reads directories in batches and stops after 50,000 entries, the day
+  directories included. A thread that Codex reverted continues in a new file,
+  `rollout-<time>-<thread id>_<rollout id>.jsonl`, in the day directory of the
+  revert; the reader looks at every day from the thread's creation to now (up
+  to a year) and takes the newest of the thread's files, and when the search
+  cannot finish it posts the screen rather than an older file's answer. It
+  reads the file from the end, within the
   same 4 MiB budget as Claude Code, and posts the last completed turn's final
   answer, which Codex records as the turn's `task_complete` message: the
   progress notes Codex prints while it works are not part of it. A turn that is
