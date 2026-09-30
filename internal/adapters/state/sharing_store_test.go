@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -41,7 +42,8 @@ func TestSharingStoreRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows does not expose Unix permission bits through FileMode.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("permissions %v", info.Mode())
 	}
 	if err := store.Save(ctx, s); err == nil {
