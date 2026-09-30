@@ -613,6 +613,31 @@ func TestOutboundScreenFallsBackWhenNoReply(t *testing.T) {
 	}
 }
 
+// TestOutboundScreenCodexRolledBackAnswerIsNotSent covers a Codex thread
+// whose last answer was rolled back: the reader reports ErrNoReply, /screen
+// posts the current screen and the removed answer reaches no message.
+func TestOutboundScreenCodexRolledBackAnswerIsNotSent(t *testing.T) {
+	const removed = "REMOVED-ANSWER"
+	f := newBridgeFixture(t)
+	a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
+	a.Kind = "codex"
+	f.agents[a.Key] = a
+	f.herdr.SetScreen("p1", "current screen")
+	f.replies.Fail(a.Key, fmt.Errorf("%w: the last codex turn was rolled back", domain.ErrNoReply))
+	if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+		t.Fatal(err)
+	}
+	sent := f.tg.Sent()
+	if len(sent) != 1 || sent[0].Text != "current screen" || !sent[0].Code {
+		t.Fatalf("Sent = %+v, want the current screen", sent)
+	}
+	for _, m := range sent {
+		if strings.Contains(m.Text, removed) {
+			t.Fatalf("message %q carries the rolled-back answer", m.Text)
+		}
+	}
+}
+
 // TestOutboundScreenWithLinesSkipsReplySource covers /screen N: an
 // explicit line count always reads the literal screen and never consults
 // the reply source, even when one has something to say.

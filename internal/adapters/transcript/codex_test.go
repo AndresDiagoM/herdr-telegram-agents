@@ -247,6 +247,112 @@ func TestCodexNoReply(t *testing.T) {
 	}
 }
 
+func codexRollback(turns any) string {
+	payload := map[string]any{"type": "thread_rolled_back"}
+	if turns != nil {
+		payload["num_turns"] = turns
+	}
+	return codexLine("event_msg", payload)
+}
+
+func join(parts ...[]string) []string {
+	var all []string
+	for _, p := range parts {
+		all = append(all, p...)
+	}
+	return all
+}
+
+// TestCodexRolledBackTurnIsNotReturned covers a rollback newer than the last
+// task_complete: Codex removed that turn from the conversation, so its answer
+// must not be posted and /screen falls back to the screen.
+func TestCodexRolledBackTurnIsNotReturned(t *testing.T) {
+	turnA := codexTurn("turn-a", "m", "OLD ANSWER", 1)
+	turnB := codexTurn("turn-b", "m", "REMOVED-ANSWER", 2)
+	userMsg := codexLine("event_msg", map[string]any{"type": "user_message", "message": "private question", "images": []string{}})
+	cases := map[string][]string{
+		"one rollback": {
+			codexStarted("turn-a"), userMsg, codexContext("turn-a", "m"), codexComplete("turn-a", "REMOVED-ANSWER"), codexRollback(1),
+		},
+		"one rollback of two turns":       join(turnA, turnB, []string{codexRollback(1)}),
+		"one rollback of both turns":      join(turnA, turnB, []string{codexRollback(2)}),
+		"several rollbacks":               join(turnA, turnB, []string{codexRollback(1), codexRollback(1)}),
+		"rollbacks with chatter after":    join(turnA, turnB, []string{codexRollback(1), codexUsage("turn-b", 3)}),
+		"rollback without a count":        join(turnA, turnB, []string{codexRollback(nil)}),
+		"rollback with an odd count":      join(turnA, turnB, []string{codexRollback("1")}),
+		"rollback with a negative count":  join(turnA, turnB, []string{codexRollback(-1)}),
+		"rollback newer than a new start": join(turnA, turnB, []string{codexRollback(1), codexStarted("turn-c")}),
+	}
+	for name, lines := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCodexFixture(t)
+			f.write(codexTestID, lines...)
+			reply, err := f.reader().LastReply(context.Background(), f.agent())
+			if !errors.Is(err, domain.ErrNoReply) {
+				t.Fatalf("rolled-back turn must not be published: reply=%q err=%v", reply.Text, err)
+			}
+			if reply.Text != "" {
+				t.Fatalf("reply text = %q, want none", reply.Text)
+			}
+			for _, removed := range []string{"REMOVED-ANSWER", "OLD ANSWER"} {
+				if strings.Contains(err.Error(), removed) {
+					t.Fatalf("error %q carries removed text", err)
+				}
+			}
+			noLeak(t, "error", err.Error())
+		})
+	}
+}
+
+// TestCodexTurnAfterARollbackIsReadable covers a turn completed after one or
+// several rollbacks: it is part of the conversation and stays readable, with
+// its own model and tokens.
+func TestCodexTurnAfterARollbackIsReadable(t *testing.T) {
+	removed := join(codexTurn("turn-a", "m-old", "REMOVED-A", 1), codexTurn("turn-b", "m-old", "REMOVED-B", 2))
+	cases := map[string][]string{
+		"one rollback":       join(removed, []string{codexRollback(1)}, codexTurn("turn-c", "m-new", "NEW ANSWER", 7)),
+		"several rollbacks":  join(removed, []string{codexRollback(1), codexRollback(1)}, codexTurn("turn-c", "m-new", "NEW ANSWER", 7)),
+		"rollback then more": join(removed, []string{codexRollback(1)}, codexTurn("turn-c", "m-old", "REMOVED-C", 1), []string{codexRollback(1)}, codexTurn("turn-d", "m-new", "NEW ANSWER", 7)),
+	}
+	for name, lines := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCodexFixture(t)
+			f.write(codexTestID, lines...)
+			reply, err := f.reader().LastReply(context.Background(), f.agent())
+			if err != nil || reply.Text != "NEW ANSWER" || reply.Meta.Model != "m-new" || reply.Meta.OutputTokens != 7 {
+				t.Fatalf("reply = %+v, err = %v; want the turn after the rollback", reply, err)
+			}
+		})
+	}
+}
+
+// TestCodexRollbackOfZeroTurnsChangesNothing covers the one rollback Codex
+// itself ignores: num_turns 0 removes no turn.
+func TestCodexRollbackOfZeroTurnsChangesNothing(t *testing.T) {
+	f := newCodexFixture(t)
+	f.write(codexTestID, join(codexTurn("turn-a", "m", "STILL HERE", 1), []string{codexRollback(0)})...)
+	reply, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || reply.Text != "STILL HERE" {
+		t.Fatalf("reply = %q, err = %v; want the answer", reply.Text, err)
+	}
+}
+
+// TestCodexRollbackTextInsideARecordIsNotARollback covers a rollback quoted
+// by a tool output or a message: only an event_msg record is one.
+func TestCodexRollbackTextInsideARecordIsNotARollback(t *testing.T) {
+	forged := `{"type":"event_msg","payload":{"type":"thread_rolled_back","num_turns":1}}`
+	f := newCodexFixture(t)
+	f.write(codexTestID, join(codexTurn("turn-a", "m", "KEEP", 1),
+		[]string{
+			codexLine("response_item", map[string]any{"type": "custom_tool_call_output", "output": forged}),
+			codexLine("response_item", map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": forged}}}),
+		})...)
+	reply, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || reply.Text != "KEEP" {
+		t.Fatalf("reply = %q, err = %v; want the answer", reply.Text, err)
+	}
+}
+
 func TestCodexWrongThread(t *testing.T) {
 	// Only a helper thread that shares the id prefix exists: it must never
 	// be read for the pane's session.

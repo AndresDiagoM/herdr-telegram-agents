@@ -248,7 +248,8 @@ option of the Posts group:
   same 4 MiB budget as Claude Code, and posts the last completed turn's final
   answer, which Codex records as the turn's `task_complete` message: the
   progress notes Codex prints while it works are not part of it. A turn that is
-  still running, was interrupted or ended without an answer has no reply, and
+  still running, was interrupted, was rolled back (`thread_rolled_back`, so its
+  answer left the conversation) or ended without an answer has no reply, and
   neither has a pane whose session no longer matches the topic: the screen is
   posted instead. The session value and the file path (which contains the
   thread id) are used for that one lookup and never stored or logged; failures

@@ -48,6 +48,7 @@ var (
 	codexMarkComplete = []byte(`"task_complete"`)
 	codexMarkStarted  = []byte(`"task_started"`)
 	codexMarkAborted  = []byte(`"turn_aborted"`)
+	codexMarkRollback = []byte(`"thread_rolled_back"`)
 	codexMarkContext  = []byte(`"turn_context"`)
 	codexMarkUsage    = []byte(`"token_usage_record"`)
 )
@@ -269,6 +270,7 @@ type codexPayload struct {
 	TurnID           string  `json:"turn_id"`
 	LastAgentMessage *string `json:"last_agent_message"`
 	StartedAt        int64   `json:"started_at"`
+	NumTurns         *int64  `json:"num_turns"`
 	CompletedAt      int64   `json:"completed_at"`
 	Model            string  `json:"model"`
 	TurnTokenUsage   struct {
@@ -278,9 +280,9 @@ type codexPayload struct {
 
 // codexLastReplyFrom walks a rollout of size bytes backwards. The first
 // turn boundary it meets decides: a task_started means the turn is still
-// running and a turn_aborted that it was interrupted, neither has an
-// answer; a task_complete carries the answer. The walk then goes on to
-// that turn's task_started for the model and the output tokens; when the
+// running, a turn_aborted that it was interrupted and a thread_rolled_back
+// that the newest turns were removed, none has an answer; a task_complete
+// carries the answer. The walk then goes on to that turn's task_started for the model and the output tokens; when the
 // budget or the file runs out first, the answer found is returned with the
 // partial meta rather than an error.
 func codexLastReplyFrom(f io.ReaderAt, size, budget int64) (string, domain.TurnMeta, scanStats, error) {
@@ -308,7 +310,7 @@ func codexLastReplyFrom(f io.ReaderAt, size, budget int64) (string, domain.TurnM
 			return nil
 		}
 		if !haveOutcome {
-			if !bytes.Contains(line, codexMarkComplete) && !bytes.Contains(line, codexMarkStarted) && !bytes.Contains(line, codexMarkAborted) {
+			if !bytes.Contains(line, codexMarkComplete) && !bytes.Contains(line, codexMarkStarted) && !bytes.Contains(line, codexMarkAborted) && !bytes.Contains(line, codexMarkRollback) {
 				return nil
 			}
 		} else if !bytes.Contains(line, codexMarkUsage) && !bytes.Contains(line, codexMarkContext) && !bytes.Contains(line, codexMarkStarted) {
@@ -334,6 +336,15 @@ func codexLastReplyFrom(f io.ReaderAt, size, budget int64) (string, domain.TurnM
 				return fmt.Errorf("%w: the codex turn is still running", domain.ErrNoReply)
 			case "turn_aborted":
 				return fmt.Errorf("%w: the last codex turn was interrupted", domain.ErrNoReply)
+			case "thread_rolled_back":
+				// Codex drops the newest user turns when it replays a
+				// rollback, so a rollback newer than the last task_complete
+				// removed that turn: its answer is no longer part of the
+				// conversation. Only an explicit zero is a no-op.
+				if p.NumTurns != nil && *p.NumTurns == 0 {
+					return nil
+				}
+				return fmt.Errorf("%w: the last codex turn was rolled back", domain.ErrNoReply)
 			case "task_complete":
 				if p.LastAgentMessage == nil || strings.TrimSpace(*p.LastAgentMessage) == "" {
 					return fmt.Errorf("%w: the last codex turn has no final answer", domain.ErrNoReply)
