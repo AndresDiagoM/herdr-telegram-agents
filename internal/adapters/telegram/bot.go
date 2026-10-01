@@ -79,8 +79,8 @@ func redact(err error, token string) string {
 	return strings.ReplaceAll(err.Error(), token, "***")
 }
 
-// Check verifies the token with getMe and clears any webhook (dropping
-// pending updates) so long polling can start. It returns the bot identity.
+// Check verifies the token with getMe and clears any webhook, retaining
+// pending updates so private contacts can be registered. It returns the bot identity.
 func Check(ctx context.Context, b *bot.Bot, log *slog.Logger) (BotIdentity, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
@@ -89,9 +89,12 @@ func Check(ctx context.Context, b *bot.Bot, log *slog.Logger) (BotIdentity, erro
 	if err != nil {
 		return BotIdentity{}, fmt.Errorf("getMe: %w", translate(err))
 	}
-	id := BotIdentity{ID: me.ID, Username: me.Username}
+	id := BotIdentity{ID: me.ID, Username: me.Username, HasTopicsEnabled: me.HasTopicsEnabled}
 	log.Info("telegram bot identified", slog.Int64("bot_id", id.ID), slog.String("username", id.Username))
-	if _, err := b.DeleteWebhook(ctx, &bot.DeleteWebhookParams{DropPendingUpdates: true}); err != nil {
+	log.Info("private topics capability", slog.Bool("enabled", id.HasTopicsEnabled))
+	// nil keeps the default drop_pending_updates=false and avoids an empty
+	// multipart form, which the live endpoint may answer with an empty body.
+	if _, err := b.DeleteWebhook(ctx, nil); err != nil {
 		return id, fmt.Errorf("deleteWebhook: %w", translate(err))
 	}
 	log.Debug("telegram webhook cleared")
@@ -114,6 +117,8 @@ func Poll(ctx context.Context, b *bot.Bot, log *slog.Logger) {
 // status, options and help, in General (options, new, observers, away and
 // here only there).
 var botCommands = []models.BotCommand{
+	{Command: "share", Description: "Share this agent with a private contact"},
+	{Command: "shares", Description: "Manage shared access"},
 	{Command: "screen", Description: "Show screen; idle OpenCode/Codex: last reply (N: screen tail, all: history)"},
 	{Command: "keys", Description: "Send raw keys to the agent, e.g. /keys esc"},
 	{Command: "focus", Description: "Bring the agent's pane to the front in Herdr"},
@@ -152,4 +157,23 @@ func RegisterCommands(ctx context.Context, api *bot.Bot, chatID int64, log *slog
 	}
 	log.Info("commands registered", slog.Int64("chat_id", chatID), slog.Int("count", len(botCommands)))
 	return nil
+}
+
+func (g *Gateway) RegisterPrivateCommands(ctx context.Context, chat int64, commands []string) error {
+	if chat <= 0 {
+		return errors.New("invalid private command destination")
+	}
+	seen := map[string]bool{}
+	menu := make([]models.BotCommand, 0, len(commands))
+	for _, name := range commands {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		menu = append(menu, models.BotCommand{Command: name, Description: "Shared agent: " + name})
+	}
+	return g.queue.Do(ctx, func(ctx context.Context) error {
+		_, err := g.api.SetMyCommands(ctx, &bot.SetMyCommandsParams{Commands: menu, Scope: &models.BotCommandScopeChat{ChatID: chat}})
+		return translate(err)
+	})
 }

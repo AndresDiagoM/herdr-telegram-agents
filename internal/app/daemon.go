@@ -32,6 +32,9 @@ const (
 // requests replay the desired state, and socket health decides when to
 // give up. Lifecycle notices are posted to the General topic.
 type Daemon struct {
+	// Sharing is independent of owner state; an unreadable store denies
+	// guest access while the owner daemon remains usable.
+	Sharing    *Sharing
 	cfg        domain.Config
 	herdr      domain.HerdrGateway
 	tg         domain.TelegramGateway
@@ -358,6 +361,11 @@ func (d *Daemon) SweepNow() {
 // runSweep deletes stale topics with the option and rights in force, then
 // old inbox files. An inbox failure is logged and never ends the loop.
 func (d *Daemon) runSweep(ctx context.Context) error {
+	if d.bridge != nil && d.bridge.PrivateReconciler != nil {
+		if err := d.bridge.PrivateReconciler.Sweep(ctx, d.opts.DeleteAfter()); err != nil {
+			d.log.Warn("private topic retention failed")
+		}
+	}
 	deleted, err := d.reconciler.Sweep(ctx, d.opts.DeleteAfter(), d.rights)
 	if err := d.handleErr(ctx, err); err != nil {
 		return err
@@ -497,6 +505,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-presenceTick:
+			if d.Sharing != nil {
+				_ = d.Sharing.Expire(ctx, d.clock.Now())
+				_ = d.Sharing.Flush(ctx, d.clock.Now(), false)
+			}
 			presenceTick = d.clock.After(presenceInterval)
 			d.presence.Poll(ctx)
 		case quiet := <-d.presence.Changes():
@@ -639,6 +651,11 @@ func (d *Daemon) checkRights(ctx context.Context) error {
 
 func (d *Daemon) onTelegramEvent(ctx context.Context, raw domain.Event) error {
 	switch ev := raw.(type) {
+	case domain.PrivateReachability:
+		if d.Sharing != nil {
+			return d.Sharing.Reachability(ctx, ev.RecipientID, ev.Unavailable, d.clock.Now())
+		}
+		return nil
 	case domain.RightsChanged:
 		d.log.Info("telegram rights changed", slog.Bool("manage_topics", ev.CanManageTopics))
 		d.rights.CanManageTopics = ev.CanManageTopics
@@ -654,7 +671,12 @@ func (d *Daemon) onTelegramEvent(ctx context.Context, raw domain.Event) error {
 			return d.replay(ctx, false)
 		}
 		return nil
-	case domain.TopicMessage, domain.TopicAttachment, domain.ButtonPressed, domain.GeneralCommand, domain.StrangerSeen:
+	case domain.ButtonPressed:
+		if d.bridge != nil && d.bridge.Shares != nil {
+			d.bridge.Shares.DenyImmediately(ctx, ev)
+		}
+		return d.submitBridge(ctx, raw)
+	case domain.PrivateMessage, domain.TopicMessage, domain.TopicAttachment, domain.GeneralCommand, domain.StrangerSeen:
 		return d.submitBridge(ctx, raw)
 	case domain.TopicClosed:
 		return d.handleErr(ctx, d.reconciler.OnTopicClosed(ctx, ev.ThreadID))
@@ -714,8 +736,17 @@ func (d *Daemon) handleErr(ctx context.Context, err error) error {
 	if errors.As(err, &migrated) {
 		d.log.Warn("chat migrated, updating config; restart the daemon to use the new id",
 			slog.Int64("old", d.cfg.ChatID), slog.Int64("new", migrated.NewChatID))
+		// /observers saves the config from the bridge while the daemon
+		// runs, so d.cfg may be stale: start from the saved config.
+		next := d.cfg
+		if saved, err := d.configs.Load(ctx); err == nil {
+			next = saved
+		} else {
+			d.log.Warn("[FIX] config unreadable on chat migration, saving the startup copy", slog.String("err", err.Error()))
+		}
+		next.ChatID = migrated.NewChatID
 		d.cfg.ChatID = migrated.NewChatID
-		if err := d.configs.Save(ctx, d.cfg); err != nil {
+		if err := d.configs.Save(ctx, next); err != nil {
 			d.log.Error("save migrated config failed", slog.String("err", err.Error()))
 		}
 		d.notify(ctx, "the Telegram group id changed; restart Telegram Agents to continue")
@@ -776,6 +807,11 @@ func (d *Daemon) socketGone(start time.Time) bool {
 func (d *Daemon) shutdown() {
 	ctx, cancel := context.WithTimeout(context.Background(), flushTimeout)
 	defer cancel()
+	if d.Sharing != nil {
+		if err := d.Sharing.Flush(ctx, d.clock.Now(), true); err != nil {
+			d.log.Warn("sharing shutdown flush failed")
+		}
+	}
 	d.general(ctx, fmt.Sprintf("⏹ %s stopping", d.title()))
 	d.dashboard.Stop(ctx)
 	if err := d.reconciler.Flush(ctx); err != nil {

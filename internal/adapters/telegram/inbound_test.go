@@ -388,7 +388,7 @@ func TestInboundCallbackFromOperatorEmitsButtonPressed(t *testing.T) {
 	if !ok {
 		t.Fatalf("event type %T", ev)
 	}
-	want := domain.ButtonPressed{CallbackID: "cb-1000", ThreadID: 7, MessageID: 1000, FromID: testOperator, Data: "2"}
+	want := domain.ButtonPressed{ChatID: testChatID, UpdateID: 3, SentAt: time.Unix(0, 0), CallbackID: "cb-1000", ThreadID: 7, MessageID: 1000, FromID: testOperator, Data: "2"}
 	if ev != want {
 		t.Errorf("event = %+v, want %+v", ev, want)
 	}
@@ -467,6 +467,7 @@ func TestInboundAttachmentEvents(t *testing.T) {
 			tc.mutate(u.Message)
 			h.bot.ProcessUpdate(context.Background(), u)
 			got, ok := expectEvent(t, h.gw.Events()).(domain.TopicAttachment)
+			tc.want.ChatID, tc.want.UpdateID, tc.want.SentAt = testChatID, 1, time.Unix(0, 0)
 			tc.want.ThreadID, tc.want.MessageID, tc.want.FromID = 42, 700+i, testOperator
 			if !ok || got != tc.want {
 				t.Fatalf("event = %#v, want %#v", got, tc.want)
@@ -640,5 +641,30 @@ func TestInboundStrangerSeen(t *testing.T) {
 	h.bot.ProcessUpdate(ctx, generalFrom(stranger, "/status"))
 	if got, ok := expectEvent(t, h.gw.Events()).(domain.GeneralCommand); !ok || got.Role != domain.RoleObserver {
 		t.Fatalf("event after SetAccess = %#v", got)
+	}
+}
+
+func TestPrivateServiceCleanupKeepsDestination(t *testing.T) {
+	h := newHarness(t)
+	deleted := make(chan url.Values, 2)
+	h.api.on("deleteMessage", func(f url.Values) apiReply { deleted <- f; return okReply(true) })
+	for _, chat := range []int64{101, 202} {
+		update := ownService(71, 7, func(m *models.Message) {
+			m.ForumTopicEdited = &models.ForumTopicEdited{Name: "private"}
+			m.Chat.ID = chat
+			m.Chat.Type = models.ChatTypePrivate
+		})
+		h.bot.ProcessUpdate(h.ctx, update)
+		select {
+		case f := <-deleted:
+			if f.Get("chat_id") != strconv.FormatInt(chat, 10) || f.Get("message_id") != "71" {
+				t.Fatal("private notice crossed chats")
+			}
+		case <-h.ctx.Done():
+			t.Fatal("cleanup did not finish")
+		}
+	}
+	if len(h.api.callsOf("getChatMember")) != 0 {
+		t.Fatal("private deletion checked group rights")
 	}
 }

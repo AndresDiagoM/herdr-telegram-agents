@@ -12,7 +12,7 @@ import (
 // so readers never see a partial file: create, write, fsync, chmod, rename.
 func writeAtomic(path string, data []byte, mode os.FileMode) (err error) {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")

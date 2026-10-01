@@ -27,6 +27,9 @@ type UpdateLock struct {
 	alive func(int) bool
 	log   *slog.Logger
 	owner updateOwner
+	// beforeRecover runs after a stale owner was read; tests interleave a
+	// competing worker there.
+	beforeRecover func()
 }
 
 func NewUpdateLock(stateDir string, alive func(int) bool, log *slog.Logger) *UpdateLock {
@@ -72,21 +75,74 @@ func (l *UpdateLock) Acquire() error {
 			if err != nil {
 				continue
 			}
-			if time.Since(st.ModTime()) < time.Minute {
+			if time.Since(st.ModTime()) < staleGrace {
 				return ErrUpdateLocked
 			}
 		}
-		// Rename first: only one contender can move this particular stale
-		// directory. The winner removes it; everyone retries atomic mkdir.
-		quarantine := fmt.Sprintf("%s.stale.%d.%d", l.path, os.Getpid(), time.Now().UnixNano())
-		if err := os.Rename(l.path, quarantine); err == nil {
-			_ = os.RemoveAll(quarantine)
-			if l.log != nil {
-				l.log.Warn("stale update lock removed", slog.Int("old_pid", owner.PID))
-			}
+		if l.beforeRecover != nil {
+			l.beforeRecover()
+		}
+		if err := l.recoverStale(owner, readErr); err != nil {
+			return err
 		}
 	}
 	return ErrUpdateLocked
+}
+
+// staleGrace is how long an ownerless lock directory counts as a worker
+// that is still writing its owner record.
+const staleGrace = time.Minute
+
+// recoverStale removes the lock directory a dead owner left behind. Two
+// workers may have read the same stale owner; recovery runs under its own
+// mkdir lock and re-reads the owner there, so the second one finds the
+// first one's fresh lock instead of moving it away.
+func (l *UpdateLock) recoverStale(seen updateOwner, seenErr error) error {
+	recovery := l.path + ".recover"
+	if err := os.Mkdir(recovery, 0o700); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("create update lock recovery: %w", err)
+		}
+		// A recovery left by a crashed worker blocks only for staleGrace.
+		if st, statErr := os.Stat(recovery); statErr == nil && time.Since(st.ModTime()) >= staleGrace {
+			_ = os.Remove(recovery)
+		}
+		return ErrUpdateLocked
+	}
+	defer os.Remove(recovery)
+	owner, err := l.readOwner()
+	switch {
+	case err == nil && (seenErr != nil || owner.Nonce != seen.Nonce):
+		// Someone replaced the stale owner since it was read.
+		if l.log != nil {
+			l.log.Warn("[FIX] update lock taken during stale recovery", slog.Int("pid", owner.PID))
+		}
+		return ErrUpdateLocked
+	case err == nil && l.alive(owner.PID):
+		return ErrUpdateLocked
+	case errors.Is(err, os.ErrNotExist):
+		if _, statErr := os.Stat(l.path); errors.Is(statErr, os.ErrNotExist) {
+			return nil // already gone; retry mkdir
+		}
+		fallthrough
+	case err != nil:
+		st, statErr := os.Stat(l.path)
+		if statErr != nil {
+			return nil
+		}
+		if time.Since(st.ModTime()) < staleGrace {
+			return ErrUpdateLocked
+		}
+	}
+	quarantine := fmt.Sprintf("%s.stale.%d.%d", l.path, os.Getpid(), time.Now().UnixNano())
+	if err := os.Rename(l.path, quarantine); err != nil {
+		return nil
+	}
+	_ = os.RemoveAll(quarantine)
+	if l.log != nil {
+		l.log.Warn("stale update lock removed", slog.Int("old_pid", owner.PID))
+	}
+	return nil
 }
 
 func (l *UpdateLock) Active() bool {

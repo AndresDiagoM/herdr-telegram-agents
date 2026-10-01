@@ -26,6 +26,31 @@ const (
 	gitWaitDelay = time.Second
 )
 
+// gitSafeConfig switches off every program the repository's own config can
+// name for the read-only subcommands /git runs: the fsmonitor hook, hooks,
+// the pager. /git runs in whatever directory the agent works in, which may
+// be a repository nobody on this machine wrote.
+var gitSafeConfig = []string{
+	"-c", "color.ui=never",
+	"-c", "core.fsmonitor=false",
+	"-c", "core.hooksPath=" + os.DevNull,
+	"-c", "core.pager=cat",
+}
+
+// gitDiffing are the subcommands that render diffs and therefore accept
+// --no-ext-diff and --no-textconv (diff.external and textconv drivers).
+var gitDiffing = map[string]bool{"diff": true, "log": true, "show": true}
+
+// gitArgv builds the full argv for one run.
+func gitArgv(args []string) []string {
+	argv := append([]string(nil), gitSafeConfig...)
+	if len(args) > 0 && gitDiffing[args[0]] {
+		argv = append(argv, args[0], "--no-ext-diff", "--no-textconv")
+		return append(argv, args[1:]...)
+	}
+	return append(argv, args...)
+}
+
 // errOutputCapped stops the stdout copy once gitMaxOutput is reached.
 var errOutputCapped = errors.New("git output capped")
 
@@ -58,11 +83,12 @@ func (r *GitRunner) Run(ctx context.Context, dir string, args []string) (domain.
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
-	argv := append([]string{"-c", "color.ui=never"}, args...)
+	argv := gitArgv(args)
+	r.log.Debug("[FIX] git safe argv", slog.String("argv", strings.Join(argv, " ")))
 	cmd := command(ctx, bin, argv...)
 	cmd.Dir = dir
 	cmd.WaitDelay = gitWaitDelay
-	cmd.Env = append(os.Environ(), "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
+	cmd.Env = append(withoutEnv(os.Environ(), "GIT_EXTERNAL_DIFF"), "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	stdout := &limitedWriter{max: r.maxBytes}
 	var stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = stdout, &stderr
@@ -95,6 +121,22 @@ func (r *GitRunner) Run(ctx context.Context, dir string, args []string) (domain.
 		return domain.GitResult{}, fmt.Errorf("git %s: %w", args[0], runErr)
 	}
 	return domain.GitResult{}, fmt.Errorf("git %s: %w: %s", args[0], runErr, firstLine(msg))
+}
+
+// withoutEnv drops the named variables from env.
+func withoutEnv(env []string, names ...string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		drop := false
+		for _, n := range names {
+			drop = drop || name == n
+		}
+		if !drop {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // isBrokenPipe reports whether git died because its stdout was closed by

@@ -1170,7 +1170,7 @@ func TestInboundGitErrors(t *testing.T) {
 		err  error
 		want string
 	}{
-		{fmt.Errorf("%w: /home/u/repo", domain.ErrNotRepository), "⚠️ not a git repository: /home/u/repo"},
+		{fmt.Errorf("%w: /home/u/repo", domain.ErrNotRepository), "⚠️ not a git repository"},
 		{domain.ErrGitMissing, "⚠️ git is not installed"},
 		{context.DeadlineExceeded, "⚠️ git timed out"},
 		{errors.New("git status: exit status 128: fatal: bad object HEAD"), "⚠️ git status failed: git status: exit status 128: fatal: bad object HEAD"},
@@ -1405,7 +1405,7 @@ func TestInboundAttachmentAgentGoneAfterDownload(t *testing.T) {
 	if err := f.in.HandleAttachment(f.ctx, attachment(101, 90, domain.AttachmentPhoto, "p", "", "", 1)); err != nil {
 		t.Fatal(err)
 	}
-	assertCallsEqual(t, f.tg, "download:p:20971520", "send:101:⚠️ agent has exited, file kept at /state/inbox/20260902-120000-90-photo.jpg:reply=90")
+	assertCallsEqual(t, f.tg, "download:p:20971520", "send:101:⚠️ agent has exited, file kept in the inbox: 20260902-120000-90-photo.jpg:reply=90")
 	if n := len(f.herdr.Prompts()); n != 0 {
 		t.Fatalf("prompted an exited agent: %d", n)
 	}

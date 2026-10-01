@@ -103,6 +103,8 @@ throwaway `debian:bookworm-slim` containers (amd64 and arm64) that clone the
 tag and run `scripts/install.sh`; macOS clones the tag into a temporary
 directory and runs the same script with a `PATH` that has no Go. Nothing
 outside the containers and that temporary directory is touched.
+`HERDR_TG_BASE_URL` must be `https://`; a local snapshot served over http
+also needs `HERDR_TG_ALLOW_INSECURE_BASE=1`, which the script passes through.
 
 - [x] `sh scripts/verify-install.sh <version> linux` prints `verify: linux/amd64 ok` and `verify: linux/arm64 ok` (2026-09-03, v0.1.0, v0.1.1, v0.2.0, v0.3.0, v0.4.0 and v0.5.0)
 - [x] `herdr plugin install permgps/herdr-telegram-agents -y` in a `debian:bookworm-slim` container with Herdr installed from `herdr.dev/install.sh` and no Go: the preview lists 7 actions, 2 panes and 2 build commands, `herdr plugin list` shows the plugin enabled, and the managed binary reports its version (2026-09-03, v0.2.0 with Herdr 0.8.2 on linux/arm64)
@@ -131,7 +133,7 @@ every 30 minutes, so a release becomes visible without any further step.
 Needs a real Herdr session with at least two agents and the configured
 Telegram group on a phone.
 
-- [x] **Setup wizard**: the setup action opens the popup, the token is accepted, the `t.me/<bot>?start=setup` link adds the bot to the group with **Manage topics**, **Delete messages** and **Pin messages**, and the daemon starts
+- [x] **Setup wizard**: the setup action opens the popup, the token is accepted, the `t.me/<bot>?start=setup_<code>` link adds the bot to the group with **Manage topics**, **Delete messages** and **Pin messages**, and the daemon starts
 - [x] **Topic per agent**: every live agent has a topic named `<workspace> · <agent>`; a new agent creates one within a few seconds
 - [x] **Status icons**: ⚡ working, ✅ idle, ❓ blocked, 🏆 done, 👀 unknown, 🏁 on exit; the icon follows the agent within one debounce window
 - [x] **Rename both ways**: renaming the tab in Herdr renames the topic; renaming the topic in Telegram renames the tab (or the custom agent name)
@@ -156,7 +158,7 @@ Telegram group on a phone.
 - [x] **File too big**: a 25 MB document → `⚠️ file too big: 25 MB > 20 MB`, nothing saved (2026-09-06: a 25.5 MB CSV, `attachment refused reason=too_big`)
 - [x] **Inbox off**: `/options` → Inbox → untick `Accept files` → a photo answers `⚠️ inbox is off (/options → Inbox)`; tick it again
 - [x] **git status and diff**: in this repository's topic `/git status` → a quoted code block starting `## <branch>`; `/git diff` with a change larger than a message → a `herdr_tg-diff-<hhmmss>.patch` file with the caption `git diff HEAD · N lines`; `/git log 3` → three lines; `/git push` → `usage: /git status | diff [staged] | log [N]` (2026-09-06: status 5 lines inline, diff of 501 lines as a document, log 3 lines, push refused)
-- [x] **git outside a repository**: `/git status` in the topic of an agent whose pane runs outside a repository (`/new` in a scratch workspace) → `⚠️ not a git repository: <cwd>`
+- [x] **git outside a repository**: `/git status` in the topic of an agent whose pane runs outside a repository (`/new` in a scratch workspace) → `⚠️ not a git repository`
 - [x] **Done**: a finished agent posts its tail silently
 - [x] **Reactions**: with `React to prompts` at its default (off) a plain prompt gets no reaction and the log has `reaction skipped` at debug level; tick it in `/options` → Posts → a plain prompt gets 👀 within a second and 👌 when the turn ends (done, or 5 s of idle); a `y` reply to a dialog gets none
 - [x] **Question delay**: `/options` → Posts → `Question delay` → `10s`; answer a Claude Code question in Herdr within 10 s → no post, log `screen skipped … reason=not_blocked`; leave the next one unanswered → posted after ~11.5 s with buttons, log `capture compared`; set it back to `Off`
@@ -265,6 +267,44 @@ on 2026-09-25. The code is also built and unit-tested on a Windows CI runner.
 - [x] `status` reports the daemon's line, `quiet=` and `pager=` included
 - [x] Presence works with `Quiet while at the desk` ticked: typing keeps `quiet=on` (the `GetLastInputInfo` idle source), leaving the machine for `Away after` minutes turns it to `away` and the topics catch up
 - [x] A daemon that is not listening is reported as "not listening on its control channel" and `stop` escalates to a kill
+
+## Private sharing acceptance
+
+Status on 2026-09-30: race tests, vet, staticcheck, formatting/import checks and
+all five platform build/vet targets passed. An approved recipient completed
+registration and an owner confirmed Read access. The recipient confirmed on a
+phone that the agent/service topics are visible and `/screen` works. Exact client
+version was not supplied. The remaining phone/Desktop checks below are pending;
+notification/navigation parity is not established. Record client versions and
+outcomes only, without tokens or private conversation content.
+
+- [ ] Enable private Topics in BotFather; check that disabled capability refuses
+  a grant while owner-group operation continues.
+- [ ] Send a fresh private message, find the numeric recipient in `/share`, and
+  grant Read. Check that its contents were not forwarded and no old output was
+  replayed. Repeat with duplicate display names and more than ten contacts.
+- [ ] On phone and Desktop, verify the first topic, icon and access card. Change
+  name/icon repeatedly; confirm propagation before notices disappear after
+  20 seconds. Repeat with Keep, and verify pin and creation notices.
+- [ ] Check `/agents`, its buttons, scoped command menu and navigation fallback.
+  A second recipient must see only their own grants. Remove the last grant and
+  verify that agent commands disappear from the menu.
+- [ ] Confirm Read cannot prompt, press control buttons, upload to the agent or
+  invoke `/usage`. Test Control, repository-read, close confirmation and focus
+  separately. Unknown commands and global administration remain refused.
+- [ ] Exercise prompts, attachments, albums, blocked questions, multi-select and
+  text entry while the owner and another controller also act.
+- [ ] Check one blocked alert, silent done output, local silent/pause/resume,
+  owner desk presence, global sync-off and actual client sound/mute behavior.
+- [ ] Revoke during an attachment download and a queued response. Try old
+  buttons again. Check the neutral access notice and retained history.
+- [ ] Block/unblock the bot, exit/resume the same session, replace the session
+  in its pane, and restart with incomplete identity. No unapproved reassociation
+  or duplicate topic should occur.
+- [ ] Test a missing topic and an ambiguous creation result. Verify explicit
+  repair; check the chat for orphan topics before retrying.
+- [ ] Verify owner setup, observers, pager, options/update panel and shutdown
+  both with sharing unavailable and with active private mirrors.
 
 ## See Also
 

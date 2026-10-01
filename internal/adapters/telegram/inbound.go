@@ -20,6 +20,7 @@ import (
 // operator check; General-topic commands come after topic traffic.
 func (g *Gateway) registerHandlers() {
 	g.api.RegisterHandlerMatchFunc(g.matchOwnService, g.onOwnService)
+	g.api.RegisterHandlerMatchFunc(g.matchPrivate, g.onPrivate)
 	g.api.RegisterHandlerMatchFunc(g.matchCallback, g.onCallback)
 	g.api.RegisterHandlerMatchFunc(g.matchOurTopic, g.onTopicUpdate)
 	g.api.RegisterHandlerMatchFunc(g.matchGeneral, g.onGeneral)
@@ -33,7 +34,13 @@ func (g *Gateway) registerHandlers() {
 // are excluded: the Bot API refuses to delete them.
 func (g *Gateway) matchOwnService(u *models.Update) bool {
 	m := u.Message
-	if m == nil || m.From == nil || g.botID == 0 || m.From.ID != g.botID || m.Chat.ID != g.chatID {
+	if m == nil || m.From == nil || g.botID == 0 || m.From.ID != g.botID {
+		return false
+	}
+	if m.Chat.Type == models.ChatTypePrivate {
+		return m.ForumTopicEdited != nil || m.PinnedMessage != nil
+	}
+	if m.Chat.ID != g.chatID {
 		return false
 	}
 	return m.ForumTopicEdited != nil || m.ForumTopicClosed != nil || m.ForumTopicReopened != nil || m.PinnedMessage != nil
@@ -187,20 +194,24 @@ func (g *Gateway) drop(reason string, chatID, fromID int64) {
 func (g *Gateway) onTopicUpdate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	m := u.Message
 	thread := m.MessageThreadID
+	if g.rejectRetained(ctx, m, false) {
+		_, _ = g.Send(ctx, domain.Outgoing{ThreadID: thread, Text: "This message predates startup. Please resend it."})
+		return
+	}
 	switch {
 	case m.ForumTopicEdited != nil:
 		if m.ForumTopicEdited.Name == "" {
 			g.log.Debug("telegram topic icon edit ignored", slog.Int("thread_id", thread))
 			return
 		}
-		g.emit(ctx, "topic_renamed", thread, domain.TopicRenamed{ThreadID: thread, Name: m.ForumTopicEdited.Name})
+		g.emit(ctx, "topic_renamed", thread, domain.TopicRenamed{ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), ThreadID: thread, Name: m.ForumTopicEdited.Name})
 	case m.ForumTopicClosed != nil:
-		g.emit(ctx, "topic_closed", thread, domain.TopicClosed{ThreadID: thread})
+		g.emit(ctx, "topic_closed", thread, domain.TopicClosed{ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), ThreadID: thread})
 	case m.ForumTopicReopened != nil:
-		g.emit(ctx, "topic_reopened", thread, domain.TopicReopened{ThreadID: thread})
+		g.emit(ctx, "topic_reopened", thread, domain.TopicReopened{ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), ThreadID: thread})
 	case m.Text != "":
 		g.log.Debug("telegram topic message", slog.Int("thread_id", thread), slog.Int("message_id", m.ID), slog.Int("len", len(m.Text)))
-		g.emit(ctx, "topic_message", thread, domain.TopicMessage{ThreadID: thread, MessageID: m.ID, FromID: m.From.ID, Text: m.Text})
+		g.emit(ctx, "topic_message", thread, domain.TopicMessage{ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), ThreadID: thread, MessageID: m.ID, FromID: m.From.ID, Text: m.Text})
 	default:
 		at := attachmentOf(m)
 		if at == nil {
@@ -209,6 +220,7 @@ func (g *Gateway) onTopicUpdate(ctx context.Context, _ *bot.Bot, u *models.Updat
 		}
 		g.log.Debug("telegram attachment", slog.Int("thread_id", thread), slog.Int("message_id", m.ID), slog.String("kind", string(at.Kind)),
 			slog.Int64("size", at.Size), slog.String("mime", at.MIME), slog.String("group", at.GroupID), slog.Int("caption_len", len(at.Caption)))
+		at.UpdateID = u.ID
 		g.emit(ctx, "topic_attachment", thread, *at)
 	}
 }
@@ -218,7 +230,7 @@ func (g *Gateway) onTopicUpdate(ctx context.Context, _ *bot.Bot, u *models.Updat
 // a video, with the caption and the media group. Stickers, animations and
 // the rest answer nil.
 func attachmentOf(m *models.Message) *domain.TopicAttachment {
-	at := domain.TopicAttachment{ThreadID: m.MessageThreadID, MessageID: m.ID, FromID: m.From.ID, GroupID: m.MediaGroupID, Caption: m.Caption}
+	at := domain.TopicAttachment{ChatID: m.Chat.ID, SentAt: time.Unix(int64(m.Date), 0), ThreadID: m.MessageThreadID, MessageID: m.ID, FromID: m.From.ID, GroupID: m.MediaGroupID, Caption: m.Caption}
 	switch {
 	case m.Document != nil:
 		at.Kind, at.FileID, at.Name, at.MIME, at.Size = domain.AttachmentDocument, m.Document.FileID, m.Document.FileName, m.Document.MimeType, m.Document.FileSize
@@ -248,6 +260,10 @@ func attachmentOf(m *models.Message) *domain.TopicAttachment {
 func (g *Gateway) onCallback(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	q := u.CallbackQuery
 	m := callbackMessage(q)
+	if g.rejectRetained(ctx, m, true) {
+		_ = g.AnswerButton(ctx, q.ID, "This button predates startup. Request a new panel.")
+		return
+	}
 	if m.Chat.ID != g.chatID {
 		g.drop("wrong_chat", m.Chat.ID, q.From.ID)
 		_, _ = g.api.AnswerCallbackQuery(ctx, &bot.AnswerCallbackQueryParams{CallbackQueryID: q.ID, Text: "not allowed"})
@@ -270,7 +286,7 @@ func (g *Gateway) onCallback(ctx context.Context, _ *bot.Bot, u *models.Update) 
 	g.log.Debug("telegram button pressed", slog.Int("thread_id", m.MessageThreadID), slog.Int("message_id", m.ID),
 		slog.Int64("from_id", q.From.ID), slog.String("data", q.Data))
 	g.emit(ctx, "button_pressed", m.MessageThreadID, domain.ButtonPressed{
-		CallbackID: q.ID, ThreadID: m.MessageThreadID, MessageID: m.ID, FromID: q.From.ID, Data: q.Data,
+		ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), CallbackID: q.ID, ThreadID: m.MessageThreadID, MessageID: m.ID, FromID: q.From.ID, Data: q.Data,
 	})
 }
 
@@ -278,9 +294,13 @@ func (g *Gateway) onCallback(ctx context.Context, _ *bot.Bot, u *models.Update) 
 // the sender's role.
 func (g *Gateway) onGeneral(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	m := u.Message
+	if g.rejectRetained(ctx, m, false) {
+		_, _ = g.Send(ctx, domain.Outgoing{Text: "This command predates startup. Please resend it."})
+		return
+	}
 	role := g.access.Load().role(m.From.ID)
 	g.log.Debug("telegram general command", slog.Int("message_id", m.ID), slog.Int("len", len(m.Text)), slog.String("role", role.String()))
-	g.emit(ctx, "general_command", 0, domain.GeneralCommand{MessageID: m.ID, FromID: m.From.ID, Text: m.Text, Role: role})
+	g.emit(ctx, "general_command", 0, domain.GeneralCommand{ChatID: m.Chat.ID, UpdateID: u.ID, SentAt: time.Unix(int64(m.Date), 0), MessageID: m.ID, FromID: m.From.ID, Text: m.Text, Role: role})
 }
 
 // onOwnService deletes one of the bot's own topic notices. The notice
@@ -292,7 +312,22 @@ func (g *Gateway) onOwnService(ctx context.Context, _ *bot.Bot, u *models.Update
 	m := u.Message
 	setting := g.noticeDelay.Load()
 	g.log.Debug("telegram own service message", slog.Int("thread_id", m.MessageThreadID), slog.Int("message_id", m.ID))
-	go g.deleteServiceMessage(ctx, m.MessageThreadID, m.ID, setting)
+	address := domain.MessageAddress{ChatID: m.Chat.ID, MessageID: m.ID}
+	g.cleanupMu.Lock()
+	if g.cleanupPending == nil {
+		g.cleanupPending = map[domain.MessageAddress]bool{}
+	}
+	if g.cleanupPending[address] || len(g.cleanupPending) >= 256 {
+		g.cleanupMu.Unlock()
+		g.log.Debug("service cleanup already pending or at capacity")
+		return
+	}
+	g.cleanupPending[address] = true
+	g.cleanupMu.Unlock()
+	go func() {
+		defer func() { g.cleanupMu.Lock(); delete(g.cleanupPending, address); g.cleanupMu.Unlock() }()
+		g.deleteServiceMessageAt(ctx, address, m.MessageThreadID, setting)
+	}()
 }
 
 // deleteServiceMessage waits out the notice delay, then runs deleteMessage
@@ -304,25 +339,27 @@ func (g *Gateway) onOwnService(ctx context.Context, _ *bot.Bot, u *models.Update
 // administrator right, which setup requests but an operator may withhold,
 // so a failure is reported once at warn level with the right named and
 // afterwards at debug only.
-func (g *Gateway) deleteServiceMessage(ctx context.Context, threadID, messageID int, setting int64) {
-	attrs := []any{slog.Int("thread_id", threadID), slog.Int("message_id", messageID)}
+func (g *Gateway) deleteServiceMessageAt(ctx context.Context, address domain.MessageAddress, threadID int, setting int64) {
+	attrs := []any{slog.Int64("chat_id", address.ChatID), slog.Int("thread_id", threadID), slog.Int("message_id", address.MessageID)}
 	if setting == noticeKeep {
 		g.log.Debug("service message kept", attrs...)
 		return
 	}
 	if delay := time.Duration(setting); delay > 0 {
 		g.log.Debug("service message delete scheduled", append(attrs, slog.Int64("delay_ms", delay.Milliseconds()))...)
-		select {
-		case <-time.After(delay):
-		case <-ctx.Done():
+		if err := g.noticeSleep(ctx, delay); err != nil {
 			g.log.Debug("service message not deleted, context done", attrs...)
 			return
 		}
 	}
-	err := g.queue.Do(ctx, func(ctx context.Context) error {
-		_, err := g.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: g.chatID, MessageID: messageID})
+	err := g.destinationQueue(address.ChatID).Do(ctx, func(ctx context.Context) error {
+		_, err := g.api.DeleteMessage(ctx, &bot.DeleteMessageParams{ChatID: address.ChatID, MessageID: address.MessageID})
 		return translate(err)
 	})
+	if err != nil && address.ChatID != g.chatID {
+		g.log.Debug("private service cleanup failed", attrs...)
+		return
+	}
 	switch {
 	case err == nil:
 		g.log.Debug("service message deleted", attrs...)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -27,7 +28,8 @@ func (r *runningBridge) reactionsOn(t *testing.T) {
 
 // newRunningBridge builds a Bridge over the fixture's fakes with a real
 // registry and reconciler, and runs it until the test ends.
-func newRunningBridge(t *testing.T) *runningBridge {
+// setup runs against the bridge before Run starts.
+func newRunningBridge(t *testing.T, setup ...func(*bridgeFixture, *Bridge)) *runningBridge {
 	t.Helper()
 	f := newBridgeFixture(t)
 	cfg := domain.Config{ChatID: -1001234567890, BotUsername: "agents_bot"}
@@ -41,6 +43,9 @@ func newRunningBridge(t *testing.T) *runningBridge {
 	b.in.agents = f.in.agents
 	b.in.live = f.in.live
 	b.out.topics, b.in.topics = f.view, f.view
+	for _, fn := range setup {
+		fn(f, b)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -472,5 +477,26 @@ func TestBridgeRunsDownloadOffTheLoop(t *testing.T) {
 	waitUntil(t, "attachment prompt", func() bool { return len(r.herdr.Prompts()) == 2 })
 	if p := r.herdr.Prompts(); !strings.HasPrefix(p[1], "p1: pic\n\n") {
 		t.Fatalf("attachment prompt = %q", p[1])
+	}
+}
+
+func TestPrivateFloodLeavesOwnerControlCapacity(t *testing.T) {
+	busy := 0
+	b := &Bridge{privateJobs: make(chan any, 32), control: make(chan any, 1), log: slog.New(slog.DiscardHandler), PrivateBusy: func(int64) { busy++ }}
+	for range 100 {
+		if err := b.SubmitContext(context.Background(), domain.PrivateMessage{Contact: domain.PrivateContact{ActorID: 10}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if busy != 68 || len(b.privateJobs) != 32 {
+		t.Fatal("private overload was not bounded and reported")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := b.SubmitContext(ctx, domain.GeneralCommand{Text: "/shares"}); err != nil {
+		t.Fatal("private flood blocked owner command")
+	}
+	if len(b.control) != 1 {
+		t.Fatal("owner command missing")
 	}
 }

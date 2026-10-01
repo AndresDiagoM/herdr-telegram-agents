@@ -188,6 +188,28 @@ func TestSupervisorStopKillsWhenControlUnavailable(t *testing.T) {
 	}
 }
 
+// TestSupervisorStopUnverifiedPidWithoutControl: when the pid's start time
+// cannot be checked and nothing answers on the control channel, the pid may
+// belong to any process; it must not be signalled.
+func TestSupervisorStopUnverifiedPidWithoutControl(t *testing.T) {
+	f := newSup(t)
+	ctx := context.Background()
+	pid, _, _ := f.sup.Start(ctx)
+	f.proc.SetControlUnavailable(true)
+	f.proc.SetUnverified(true)
+	if err := f.sup.Stop(ctx); err == nil {
+		t.Fatal("Stop succeeded on an unverified pid")
+	}
+	if !f.proc.Alive(pid) {
+		t.Fatal("unverified process was killed")
+	}
+	for _, s := range f.proc.Signals() {
+		if strings.HasPrefix(s, "stop:") || strings.HasPrefix(s, "kill:") {
+			t.Fatalf("Signals = %v", f.proc.Signals())
+		}
+	}
+}
+
 func TestSupervisorDescribe(t *testing.T) {
 	f := newSup(t)
 	ctx := context.Background()

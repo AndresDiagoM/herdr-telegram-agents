@@ -838,3 +838,8 @@ func (r *Reconciler) persistPending(ctx context.Context) error {
 func sortKeys(keys []domain.Key) {
 	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
 }
+
+// KeyForThread returns the current owner topic binding for sharing panels.
+func (r *Reconciler) KeyForThread(thread int) (domain.Key, bool) {
+	return r.topics().KeyForThread(thread)
+}

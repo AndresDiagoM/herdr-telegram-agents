@@ -46,7 +46,7 @@ func (i *Inspector) Identity(ctx context.Context) (domain.BotIdentity, error) {
 		return domain.BotIdentity{}, fmt.Errorf("getMe: %w", translate(err))
 	}
 	i.log.Info("inspector identity", slog.Int64("bot_id", me.ID), slog.String("username", me.Username))
-	return domain.BotIdentity{ID: me.ID, Username: me.Username}, nil
+	return domain.BotIdentity{ID: me.ID, Username: me.Username, HasTopicsEnabled: me.HasTopicsEnabled}, nil
 }
 
 // Group reads the chat (title, forum flag) and the bot's membership; the

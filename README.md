@@ -31,7 +31,9 @@ Go toolchain on the machine where it is installed.
 2. In a Herdr pane, run `herdr plugin action invoke permgps.telegram-agents.setup`.
 3. Enter the token in the popup (input is hidden), open its bot link, press **Start**, and add
    the bot to the group with **Manage topics**, **Delete messages**, and
-   **Pin messages**. The account that selects the group becomes an operator.
+   **Pin messages**. The link carries a one-time code: only the account that
+   opens it can select the group, and it becomes an operator. Promote the bot
+   as yourself, not as an anonymous admin.
 4. Confirm the group in the popup. The daemon starts and later starts with
    Herdr automatically.
 5. Mute the group if frequent topic icon notices are distracting. Agent
@@ -58,6 +60,11 @@ statuses. Operators can add read-only observers with `/observers`.
 
 See [Commands](docs/commands.md) for every command and attachment rule, and
 [Behavior](docs/behaviour.md) for sync, settings, access, and daemon details.
+
+For selected recipients, enable the bot's private Topics in BotFather and use
+`/share` in an owner agent topic. Recipients must first message the bot.
+Choose Read or Control and confirm the numeric recipient ID. See the
+[private sharing walkthrough](docs/commands.md#sharing-an-agent-privately).
 
 ## Check for updates
 

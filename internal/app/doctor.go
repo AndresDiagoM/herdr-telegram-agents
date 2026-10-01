@@ -64,7 +64,7 @@ func (d *Doctor) Run(ctx context.Context) []domain.Check {
 	} else {
 		insp, err := d.Inspector(cfg)
 		if err != nil {
-			add(domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "client: " + failureReason(err)})
+			add(domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "client: " + detailReason(err)})
 			add(domain.Check{Name: "group", Level: domain.CheckFail, Detail: "skipped: no client"})
 			add(domain.Check{Name: "operator chat", Level: domain.CheckFail, Detail: "skipped: no client"})
 		} else {
@@ -94,9 +94,9 @@ func (d *Doctor) checkConfig(ctx context.Context) (domain.Config, domain.Check) 
 	}
 	if err != nil {
 		if errors.Is(err, domain.ErrNotConfigured) {
-			return cfg, domain.Check{Name: "config", Level: domain.CheckFail, Detail: "not configured, run the setup action (" + failureReason(err) + ")"}
+			return cfg, domain.Check{Name: "config", Level: domain.CheckFail, Detail: "not configured, run the setup action (" + detailReason(err) + ")"}
 		}
-		return cfg, domain.Check{Name: "config", Level: domain.CheckFail, Detail: "unreadable: " + failureReason(err)}
+		return cfg, domain.Check{Name: "config", Level: domain.CheckFail, Detail: "unreadable: " + detailReason(err)}
 	}
 	bot := "bot id unknown"
 	if cfg.BotUsername != "" {
@@ -116,7 +116,7 @@ func (d *Doctor) checkOptions(ctx context.Context) domain.Check {
 	defer cancel()
 	opts, err := d.Options.Load(cctx)
 	if err != nil {
-		return domain.Check{Name: "options", Level: domain.CheckFail, Detail: "options.json unreadable, defaults in force: " + failureReason(err)}
+		return domain.Check{Name: "options", Level: domain.CheckFail, Detail: "options.json unreadable, defaults in force: " + detailReason(err)}
 	}
 	clean, dropped := domain.SanitizeOptions(opts, d.Choices)
 	set := 0
@@ -143,9 +143,15 @@ func (d *Doctor) checkTelegram(ctx context.Context, insp domain.TelegramInspecto
 	case errors.Is(err, domain.ErrBotUnauthorized):
 		return domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "token rejected (401), run the setup action"}
 	case err != nil:
-		return domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "getMe failed: " + failureReason(err)}
+		return domain.Check{Name: "telegram", Level: domain.CheckFail, Detail: "getMe failed: " + detailReason(err)}
 	}
-	return domain.Check{Name: "telegram", Level: domain.CheckOK, Detail: fmt.Sprintf("@%s (id %d)", id.Username, id.ID)}
+	detail := fmt.Sprintf("@%s (id %d)", id.Username, id.ID)
+	if !id.PrivateTopicsReady() {
+		detail += "; private sharing unavailable: enable Topics in BotFather"
+	} else {
+		detail += "; private topics enabled"
+	}
+	return domain.Check{Name: "telegram", Level: domain.CheckOK, Detail: detail}
 }
 
 func (d *Doctor) checkGroup(ctx context.Context, insp domain.TelegramInspector) domain.Check {
@@ -156,7 +162,7 @@ func (d *Doctor) checkGroup(ctx context.Context, insp domain.TelegramInspector) 
 	case errors.Is(err, domain.ErrForbidden):
 		return domain.Check{Name: "group", Level: domain.CheckFail, Detail: "bot is not in the group any more, add it again through the setup action"}
 	case err != nil:
-		return domain.Check{Name: "group", Level: domain.CheckFail, Detail: "lookup failed: " + failureReason(err)}
+		return domain.Check{Name: "group", Level: domain.CheckFail, Detail: "lookup failed: " + detailReason(err)}
 	}
 	r := g.Rights
 	yes := func(b bool) string {
@@ -195,7 +201,7 @@ func (d *Doctor) checkOperatorChat(ctx context.Context, insp domain.TelegramInsp
 		case errors.Is(err, domain.ErrForbidden):
 			closed = append(closed, fmt.Sprint(id))
 		default:
-			failed = append(failed, fmt.Sprintf("%d: %s", id, failureReason(err)))
+			failed = append(failed, fmt.Sprintf("%d: %s", id, detailReason(err)))
 		}
 	}
 	d.Log.Debug("operator chat probed", slog.Int("operators", len(cfg.OperatorIDs)), slog.Int("closed", len(closed)), slog.Int("failed", len(failed)))
@@ -214,7 +220,7 @@ func (d *Doctor) checkHerdr(ctx context.Context) domain.Check {
 	defer cancel()
 	info, err := d.Herdr.Ping(cctx)
 	if err != nil {
-		return domain.Check{Name: "herdr", Level: domain.CheckFail, Detail: "socket not answering: " + failureReason(err)}
+		return domain.Check{Name: "herdr", Level: domain.CheckFail, Detail: "socket not answering: " + detailReason(err)}
 	}
 	detail := fmt.Sprintf("version %s, protocol %d", info.Version, info.Protocol)
 	if len(d.SupportedProtocols) > 0 && !containsProtocol(d.SupportedProtocols, info.Protocol) {
@@ -238,7 +244,7 @@ func (d *Doctor) checkDaemon(ctx context.Context) domain.Check {
 	case errors.Is(err, domain.ErrNotRunning):
 		return domain.Check{Name: "daemon", Level: domain.CheckWarn, Detail: "not running (start action)"}
 	case err != nil:
-		return domain.Check{Name: "daemon", Level: domain.CheckFail, Detail: "pid file unreadable: " + failureReason(err)}
+		return domain.Check{Name: "daemon", Level: domain.CheckFail, Detail: "pid file unreadable: " + detailReason(err)}
 	case !d.Alive(info.PID):
 		return domain.Check{Name: "daemon", Level: domain.CheckFail, Detail: fmt.Sprintf("stale pid file for %d, run the start action", info.PID)}
 	}
@@ -254,7 +260,7 @@ func (d *Doctor) checkDaemon(ctx context.Context) domain.Check {
 	case errors.Is(err, domain.ErrControlUnavailable):
 		return domain.Check{Name: "daemon", Level: domain.CheckFail, Detail: line + ", not answering on the control channel; restart it"}
 	case err != nil:
-		return domain.Check{Name: "daemon", Level: domain.CheckWarn, Detail: line + ", status failed: " + failureReason(err)}
+		return domain.Check{Name: "daemon", Level: domain.CheckWarn, Detail: line + ", status failed: " + detailReason(err)}
 	case stats == "":
 		return domain.Check{Name: "daemon", Level: domain.CheckOK, Detail: line}
 	}
@@ -266,7 +272,7 @@ func (d *Doctor) checkMapping(ctx context.Context) domain.Check {
 	defer cancel()
 	m, err := d.Mapping.Load(cctx)
 	if err != nil {
-		return domain.Check{Name: "mapping", Level: domain.CheckFail, Detail: "mapping.json unreadable: " + failureReason(err)}
+		return domain.Check{Name: "mapping", Level: domain.CheckFail, Detail: "mapping.json unreadable: " + detailReason(err)}
 	}
 	live, exited, muted := m.Counts()
 	entries := fmt.Sprintf("%d entries", len(m.Topics))
@@ -280,7 +286,7 @@ func (d *Doctor) checkMapping(ctx context.Context) domain.Check {
 	broken, err := d.Broken()
 	switch {
 	case err != nil:
-		return domain.Check{Name: "mapping", Level: domain.CheckWarn, Detail: detail + "; backup listing failed: " + failureReason(err)}
+		return domain.Check{Name: "mapping", Level: domain.CheckWarn, Detail: detail + "; backup listing failed: " + detailReason(err)}
 	case len(broken) > 0:
 		return domain.Check{Name: "mapping", Level: domain.CheckWarn, Detail: detail + "; corrupt copies moved aside: " + strings.Join(broken, ", ")}
 	}
@@ -331,5 +337,5 @@ func sendTestReason(err error) string {
 	case errors.Is(err, domain.ErrForbidden):
 		return "the bot cannot post in the group, add it again through the setup action"
 	}
-	return failureReason(err)
+	return detailReason(err)
 }

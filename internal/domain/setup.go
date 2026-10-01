@@ -4,9 +4,19 @@ import "context"
 
 // BotIdentity is what Telegram reports about the bot behind a token.
 type BotIdentity struct {
-	ID       int64
-	Username string
+	ID               int64
+	Username         string
+	HasTopicsEnabled bool
 }
+
+// BotIdentitySource refreshes private-topic capabilities without changing
+// group permissions, polling or webhook configuration.
+type BotIdentitySource interface {
+	Identity(context.Context) (BotIdentity, error)
+}
+
+// PrivateTopicsReady is independent of administrator rights in an owner group.
+func (b BotIdentity) PrivateTopicsReady() bool { return b.ID > 0 && b.HasTopicsEnabled }
 
 // GroupCandidate is a forum supergroup where the bot was just promoted to
 // an administrator who may manage topics. FromID is the user who granted
@@ -18,10 +28,15 @@ type GroupCandidate struct {
 	FromUsername string
 }
 
+// SetupStartPrefix starts the payload of the setup deep link; the one-time
+// code follows it.
+const SetupStartPrefix = "setup_"
+
 // SetupLink is the deep link the wizard shows: opening it and pressing
-// Start makes the bot offer the group picker.
-func SetupLink(botUsername string) string {
-	return "https://t.me/" + botUsername + "?start=setup"
+// Start sends "/start setup_<code>", which binds setup to that user and
+// makes the bot offer the group picker.
+func SetupLink(botUsername, code string) string {
+	return "https://t.me/" + botUsername + "?start=" + SetupStartPrefix + code
 }
 
 // SetupProbe is the slice of Telegram the setup wizard needs: prove the

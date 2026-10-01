@@ -343,7 +343,7 @@ func (s *Stream) subscribe(ctx context.Context, panes []string) (*streamConn, er
 		return nil, fmt.Errorf("write subscribe: %w", err)
 	}
 	rd := bufio.NewReaderSize(conn, 64<<10)
-	raw, err := rd.ReadBytes('\n')
+	raw, err := readLine(rd, maxReplyLine)
 	if err != nil {
 		_ = conn.Close()
 		return nil, fmt.Errorf("await subscription_started: %w", err)

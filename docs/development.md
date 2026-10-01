@@ -132,6 +132,31 @@ Dependencies point inward (`cli` → `compose` → `app` → `domain`, adapters 
 `make lint`. No test touches the network: the Herdr adapter is tested against
 a fake socket server and the Telegram adapter against an in-process HTTP fake.
 
+## Private sharing internals
+
+`domain/sharing.go` defines recipient and grant records; `domain/access.go`
+contains the capability policy. `app.Sharing` owns durable policy and cancellation
+contexts. Queue admission checks the original actor, destination, session and
+revision immediately before dispatch. Network calls do not hold the policy lock.
+Owner revoke/suspend callbacks apply denial on the daemon loop before rendering
+through the bridge. Async attachment and Git completions retain their original
+revision and return to the shared bridge for the final check.
+
+`SharePanel`, `PrivateReconciler`, `PrivateControl`, `PrivateOutput` and
+`PrivateDashboard` separate owner administration from guest behavior. The
+composition root wires a mandatory private redactor and exact-session reply
+source. `DestinationTelegram` methods require explicit chat/topic or chat/message
+addresses. Legacy owner methods remain wrappers for the configured group.
+
+There is one Telegram client and long poller. The HTTP admission wrapper saves
+first contacts before the library advances its polling offset. Retained messages
+can register contacts, while pre-start mutating messages and old callbacks are
+refused. This does not provide exactly-once agent effects across crashes.
+
+Sharing audit logs contain IDs, revisions, actions and outcome flags. Keep new
+logs free of tokens, message bodies, attachment names/content, transcript paths
+and raw session IDs. Use the existing `LOG_LEVEL` setting for DEBUG diagnostics.
+
 ## See Also
 
 - [Testing](testing.md): automated gates and the manual checklist before a release

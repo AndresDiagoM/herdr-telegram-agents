@@ -25,6 +25,9 @@ type DaemonStatus struct {
 	Running bool
 	PID     int
 	Since   time.Time
+	// Verified means the pid provably belongs to the daemon (see
+	// domain.PidInfo.Verified).
+	Verified bool
 }
 
 // Supervisor starts, stops and signals the daemon through the pid file and
@@ -60,7 +63,7 @@ func (s *Supervisor) Status() DaemonStatus {
 		s.log.Debug("pid file points to a dead process", slog.Int("pid", info.PID))
 		return DaemonStatus{PID: info.PID, Since: info.Since}
 	}
-	return DaemonStatus{Running: true, PID: info.PID, Since: info.Since}
+	return DaemonStatus{Running: true, PID: info.PID, Since: info.Since, Verified: info.Verified}
 }
 
 // Start spawns the daemon unless one is already running. It waits until the
@@ -144,6 +147,15 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	st := s.Status()
 	if !st.Running {
 		return domain.ErrNotRunning
+	}
+	if !st.Verified {
+		// The pid's start time is unknown, so it may belong to any
+		// process. Only a daemon that answers its control channel is
+		// provably ours; never signal anything else.
+		if _, err := s.proc.Status(ctx); errors.Is(err, domain.ErrControlUnavailable) {
+			s.log.Warn("[FIX] unverified pid without control channel, not signalling", slog.Int("pid", st.PID))
+			return fmt.Errorf("pid %d is not verifiably the daemon and does not answer its control channel; remove daemon.pid by hand if no daemon runs", st.PID)
+		}
 	}
 	if err := s.proc.Stop(st.PID); err != nil {
 		if errors.Is(err, domain.ErrNotRunning) {

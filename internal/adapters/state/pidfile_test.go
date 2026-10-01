@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/permgps/herdr-telegram-agents/internal/adapters/state"
 	"github.com/permgps/herdr-telegram-agents/internal/domain"
@@ -94,5 +95,68 @@ func TestPidFileUnreadableContentIsStale(t *testing.T) {
 	}
 	if err := p.Acquire(3); err != nil {
 		t.Fatalf("Acquire over garbage = %v", err)
+	}
+}
+
+// TestPidFileRejectsReusedPid: a pid file outlives a crashed daemon and the
+// OS hands the pid to an unrelated process. That process started after the
+// file was written, so it is not the daemon: the file reads as stale and a
+// new daemon may replace it.
+func TestPidFileRejectsReusedPid(t *testing.T) {
+	dir := t.TempDir()
+	written := time.Unix(1_700_000_000, 0)
+	start := written.Add(time.Hour)
+	known := true
+	p := state.NewPidFile(dir, func(int) bool { return true }, nil).CheckStart(func(int) (time.Time, bool) { return start, known })
+	if err := os.WriteFile(p.Path(), []byte("555\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p.Path(), written, written); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := p.Read(); !errors.Is(err, domain.ErrNotRunning) {
+		t.Fatalf("Read reused pid = %+v, %v", info, err)
+	}
+	if err := p.Acquire(1); err != nil {
+		t.Fatalf("Acquire over reused pid = %v", err)
+	}
+	_ = p.Release()
+
+	// The daemon itself started before it wrote the file: verified.
+	start = written.Add(-time.Second)
+	if err := os.WriteFile(p.Path(), []byte("555\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(p.Path(), written, written); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := p.Read(); err != nil || info.PID != 555 || !info.Verified {
+		t.Fatalf("Read daemon pid = %+v, %v", info, err)
+	}
+	if err := p.Acquire(2); !errors.Is(err, domain.ErrAlreadyRunning) {
+		t.Fatalf("Acquire over live daemon = %v", err)
+	}
+	// Unknown start time: still treated as live, but unverified.
+	known = false
+	if info, err := p.Read(); err != nil || info.Verified {
+		t.Fatalf("Read unknown start = %+v, %v", info, err)
+	}
+}
+
+// TestPidFileNeverEmpty: a concurrent reader must never see an empty file,
+// which Acquire would treat as stale and delete.
+func TestPidFileNeverEmpty(t *testing.T) {
+	dir := t.TempDir()
+	p := state.NewPidFile(dir, func(int) bool { return true }, nil)
+	if err := p.Acquire(77); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(p.Path())
+	if err != nil || strings.TrimSpace(string(data)) != "77" {
+		t.Fatalf("content = %q, %v", data, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Fatalf("leftover temp files: %v", entries)
 	}
 }

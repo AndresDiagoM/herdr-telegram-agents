@@ -404,6 +404,7 @@ The options today:
 | `Skip short done posts` | Posts | Default `Off`. With `5s` … `120s`: the done post of a turn shorter than that is skipped (blocked time included; a turn whose start the daemon never saw posts). Blocked posts and reactions are unaffected. Any integer of seconds up to 3600 can be typed into `options.json`. See [Turns and reactions](#turns-and-reactions). |
 | `Accept files` | Inbox | Default on. Photos, documents, voice notes, audio and video sent to a topic are saved to the inbox and the agent is prompted with the path. Off: such messages answer `⚠️ inbox is off (/options → Inbox)`. See [Inbox](#inbox). |
 | `Largest file` | Inbox | Default 20 MB, the most Telegram lets a bot download. A larger file answers `⚠️ file too big: <size> > <max>` before any download. Any integer of megabytes from 1 to 20 can be typed into `options.json`. |
+| `Inbox size` | Inbox | Default 500 MB. The most all inbox files may take together. When a new file does not fit, the oldest files are deleted first; a file larger than the whole quota is refused with `⚠️ … file is too big`. Any integer of megabytes up to 100000 can be typed into `options.json`. |
 | `Delete files after` | Inbox | Default 7 days. Inbox files older than that are deleted once a day, at daemon start and when the option changes. `Off` keeps them. Any integer of days can be typed into `options.json`. |
 | `working` … `exited` | Appearance | The topic icon of each status and the emoji `/status` prints. Picking an emoji another status already uses answers `used by <status>` and changes nothing. A pick repaints every live topic at once (a `resync`), or when sync comes back on. |
 | `Redact secrets` | Privacy | Default on. Every text the daemon posts passes the redaction step described under [Secrets in posts](#secrets-in-posts). Off: raw text. A change applies to the next post. |
@@ -416,7 +417,7 @@ Values are saved in `options.json` next to `config.json` (mode 0600) as
 "posts.done": "screen", "posts.meta": true, "posts.fold": "20",
 "posts.chrome": true, "posts.reactions": false, "posts.pager": true,
 "posts.blocked_delay": "0", "inbox.enabled": true, "inbox.max_mb": "20",
-"inbox.delete_after_days": "7", "icons.working": "⚡", "privacy.redact": true,
+"inbox.max_total_mb": "500", "inbox.delete_after_days": "7", "icons.working": "⚡", "privacy.redact": true,
 "topics.delete_after_days": "30", "topics.notice_delay": "20", …}}`.
 Missing keys take their defaults and unknown keys survive a save. The file
 is read once at daemon start: edit it by hand and restart the daemon, or use
@@ -432,7 +433,10 @@ semantic versions with the installed manifest and binary. It scans every
 release page within a fixed bound; a network error or incomplete scan is
 shown as a failure rather than as "up to date". No GitHub token is required.
 The check verifies the host binary and its exact entry in `checksums.txt`,
-the release manifest version, and its minimum Herdr version.
+the release manifest version, and its minimum Herdr version. A stable
+installation is offered stable releases only; an installed prerelease may
+move to a newer prerelease. Asset URLs must be `https` on `github.com`, and
+downloads follow redirects only to GitHub's own and asset storage hosts.
 
 If a newer release is eligible, the panel shows a separate **Update** button.
 That button expires after five minutes and is bound to the operator, group,
@@ -448,7 +452,11 @@ action is recognised from `update.json`, so it does not block a later update.
 A local link stays local: its `main` branch must be clean, have the expected
 GitHub origin, and be able to fast-forward to the release commit on the
 remote mainline. The worker saves the old binary, stops a running daemon,
-fast-forwards, and runs the release's checksum-verified install script.
+fast-forwards, and runs the release's checksum-verified install script. The
+install script gets the approved SHA-256 (`HERDR_TG_EXPECTED_SHA256`) and
+refuses a downloaded binary that differs from it before running it; the
+download overrides `HERDR_TG_BASE_URL` and `HERDR_TG_ALLOW_INSECURE_BASE`
+never reach it from the daemon's environment.
 Detached branches, local changes, another repository, and an incompatible
 Herdr version show the release and a reason without an Update button.
 
@@ -470,6 +478,10 @@ checkout, keep any new local changes, then restore the recorded old commit
 and the binary backup under `update-backups/<job-id>/`; run the install
 script from the desired release if a fresh binary is needed. Start or
 restart the daemon through the Herdr action after the files are sound.
+
+At daemon start, when no update worker runs, the staged worker copies
+(`update-worker-<job-id>`) and backups (`update-backups/<job-id>/`) of past
+updates are removed; the current job keeps its own until it succeeded.
 
 ## Silence the group
 
@@ -501,7 +513,7 @@ the one thing that must ring come from somewhere else.
   post, and nothing typed into the private chat reaches an agent.
 - **Press Start once**: a bot may write to your private chat only after
   you opened it and pressed **Start**; setup does that through the
-  `t.me/<bot>?start=setup` link. The daemon checks each operator's chat at
+  `t.me/<bot>?start=setup_<code>` link. The daemon checks each operator's chat at
   start and when the option is switched on (log `pager reachable`); when no
   operator's chat takes messages it logs `pager unreachable: open the bot
   and press Start`, posts `⚠️ questions will ring in the topics …` into
@@ -567,15 +579,23 @@ you can see the plugin working. Tick `Quiet while at the desk` in
 Every text that leaves the daemon for Telegram (blocked and done posts,
 `/screen` and `/screen all`, the `.txt` document, the follow-up of a
 forwarded Claude Code command, summary footers, document names, the labels
-of inline buttons, panel edits)
-passes one redaction step while `Redact secrets` is on:
+of inline buttons, panel edits, topic names, button toasts and the sharing
+panel) passes one redaction step while `Redact secrets` is on. HTML posts are
+redacted between tags only, so a masked value never swallows a closing tag:
 
 - API keys and tokens keep a recognisable prefix and their last four
   characters: `sk-…a1b2` (OpenAI and Anthropic), `ghp_…9f3e` and
   `github_pat_…`, `AKIA…Q7ZX` / `ASIA…`, `xoxb-…d8c1` (Slack), `glpat-…5tq2`
-  (GitLab), `AIza…w9Yc` (Google), `eyJ…7hJk` (JWT), `Bearer …k2m4`.
-- `password=`, `passwd=`, `pwd=`, `secret=`, `token=` and `api_key=` values
-  (also with `:`) become `password=[redacted]`; the key stays.
+  (GitLab), `AIza…w9Yc` (Google), `eyJ…7hJk` (JWT), `Bearer …k2m4`,
+  `Basic …ZA==` (HTTP Basic), `sk_live_…`/`rk_test_…` (Stripe).
+- Values of keys that contain `password`, `passwd`, `pwd`, `secret`,
+  `token`, `api_key`, `access_key`, `private_key` or `credential` (also
+  inside a longer name such as `DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`,
+  `client_secret` or `?access_token=`, with `=` or `:`, and JSON keys such
+  as `"password": "…"`) become `[redacted]`; the key stays. A query value
+  ends at `&`.
+- Credentials in a URL keep the scheme and user:
+  `postgres://app:[redacted]@db/app`.
 - The bot token itself, any string shaped like a Telegram bot token and
   `-----BEGIN … PRIVATE KEY-----` blocks (to the `END` line, or to the end of
   the screen when it is cut) become `[redacted]`.
@@ -583,7 +603,12 @@ passes one redaction step while `Redact secrets` is on:
 Every pattern has a minimum length, so ordinary words such as `token: none`
 or `password reset` are left alone. The log records how many replacements
 of which kind were made (`secrets redacted kinds="openai=1"`), never the
-value. Topic names, the daemon log and the Herdr side are not touched.
+value. The daemon log and the Herdr side are not touched.
+
+Error replies in the group never quote local absolute paths: a known failure
+answers a fixed text (`⚠️ not a git repository`), anything else keeps its
+first line with each absolute path cut to `…/<file name>`. The doctor action
+keeps the full details.
 
 ## Topic cleanup
 
@@ -672,6 +697,7 @@ in `config.json`:
 |------|----------|---------|
 | `config.json` | Herdr plugin config dir (`HERDR_PLUGIN_CONFIG_DIR`), mode 0600 | bot token, chat id and title, operator ids, observer ids (`observer_ids`, written by `/observers`), log level |
 | `mapping.json` | Herdr plugin state dir (`HERDR_PLUGIN_STATE_DIR`) | agent to topic mapping, the dashboard message id (`dashboard_message_id`), and pending creation markers; exited entries stay until topic cleanup confirms deletion |
+| `sharing.json` | state dir, mode 0600 | recipients, grants, revisions, private topics, dashboard IDs and pending creation intents |
 | `options.json` | config dir, mode 0600 | the `/options` choices |
 | `inbox/` | state dir, mode 0700, files 0600 | attachments sent to topics, swept daily after `Delete files after` |
 | `daemon.pid` | state dir | pid of the running daemon |
@@ -700,10 +726,73 @@ the [topic cleanup](#topic-cleanup) deletes the topic and the entry together.
 Delete `options.json` in the config dir to return every option to its
 default.
 
+## Private mirror lifecycle and recovery
+
+A mirror binds a numeric recipient, private chat/topic, grant revision and exact
+agent session. It cannot follow a replacement session merely because its name
+or working directory matches. An exited session rejects input; verified resume
+can reuse the topic. Incomplete session identity requires owner reapproval after
+restart. Private topics are never closed or reopened through supergroup APIs.
+The existing exited-topic retention setting can remove old exited mirrors;
+policy records remain to prevent stale work from regaining access.
+
+Revocation and expiry deny new dispatches, cancel pending work and invalidate
+buttons. Already dispatched messages and running agent work cannot be recalled.
+History remains until the owner explicitly deletes the mirror or exited-topic
+retention applies. Permission changes are saved before success is reported. If
+saving a revocation fails, access is denied in memory, but **do not restart until
+saving succeeds**: the older on-disk policy may still allow access. Metadata and
+presentation changes are coalesced and flushed at shutdown.
+
+`sharing.json` is a separate versioned, atomically replaced mode-0600 file in the
+plugin state directory. Corrupt or unsupported state disables guest access and
+preserves the file; owner mapping remains independent. Switching bots does not
+reuse private bindings from the previous bot. An unknown topic-creation outcome
+keeps a durable intent. Use the owner repair action after checking the recipient's
+chat: Telegram cannot enumerate every topic whose creation reply was lost.
+The overview has its own **service-repair-confirm** action for this case.
+
+Private output is always redacted. It uses exact-session OpenCode replies where
+available, otherwise the exact target's terminal screen. The Claude reader that
+selects a transcript by working directory is never used for guests. Automatic
+reply delivery excludes replies written before activation. Explicit `/screen`
+can reveal older material still visible in that same session; `/screen all`
+exports only screens captured since activation, not the owner's earlier buffer.
+
+Blocked output has one notification in each active private topic; done posts are
+silent. There is no additional recipient pager. Owner desk presence does not
+silence recipients; global sync-off stops automatic mirror output and status
+edits. Local pause and silent mode default off. Edit/pin service notices use the
+existing notice delay (20 seconds by default), or Keep. Creation notices remain.
+Private cleanup uses the actual chat and does not require group admin rights.
+Client icon propagation and service-notice sounds still require the
+[phone/Desktop acceptance checks](testing.md#private-sharing-acceptance).
+
+Bounds: 10,000 registered contacts, 2,000 grants, 64 pending albums with ten files
+each, 20 MiB per file and 40 MiB per album, four concurrent private transfers,
+4,096 temporary private callbacks and 2,048 owner panel references. Private API
+calls use four separate bounded queues and a two-second call budget. Ambiguous
+private calls are not automatically replayed. A failed post may require another
+screen request. Durable first-contact registration happens before acknowledging
+Telegram updates; storage failures at this boundary can delay polling until
+storage recovers. At most 30 new contacts are registered per minute; further
+first contacts are refused without a reply and their updates acknowledged.
+Private event admission allows eight requests per recipient and 32 overall per
+ten seconds for recipients with a grant; contacts without one share a separate
+budget of eight per ten seconds and get no congestion notice. A separate
+32-slot bridge queue follows. Congestion notices are bounded and best effort;
+contact registration remains durable even when an agent request is rejected.
+The chat menu is republished only when its command list changes. Previously
+dropped or expired Telegram updates are unrecoverable.
+
+A recipient who blocks the bot (Telegram answers 403 in the private chat) is
+marked unavailable and their sends fail on their own; the daemon keeps
+running. Only a 403 in the owner group stops it.
+
 ## See Also
 
 - [Talking to agents](commands.md): what gets posted and what you can send
 - [Silence the group](#silence-the-group): mute the group once, let questions ring from the bot's chat
 - [Operators and observers](#operators-and-observers): who may drive the agents, who may only watch, and how strangers show up
-- [README: Actions](../README.md#actions): start, stop, resync, status, logs, doctor and the test message from Herdr
+- [README: Setup](../README.md#setup): start, stop, resync, status, logs, doctor and the test message from Herdr
 - [Development](development.md): building from source and the tree layout

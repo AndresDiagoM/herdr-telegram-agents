@@ -20,6 +20,9 @@ const (
 	// setupChooseButton is the reply keyboard label; the wizard text in
 	// internal/app names it too.
 	setupChooseButton = "Choose group"
+	// groupAnonymousBot is the sender Telegram shows for an anonymous group
+	// administrator; it can never be an operator.
+	groupAnonymousBot = 1087968824
 )
 
 // Probe implements domain.SetupProbe for the setup wizard: it proves the
@@ -36,6 +39,8 @@ type Probe struct {
 
 	mu     sync.Mutex
 	botID  int64
+	code   string // one-time setup code from the wizard's link; "" = unbound
+	owner  int64  // the user who sent the code; only they may choose
 	seen   map[int64]bool
 	out    chan domain.GroupCandidate
 	cancel context.CancelFunc // set by Candidates
@@ -83,7 +88,7 @@ func (p *Probe) Identity(ctx context.Context) (domain.BotIdentity, error) {
 	p.botID = me.ID
 	p.mu.Unlock()
 	p.log.Info("setup probe identified bot", slog.Int64("bot_id", me.ID), slog.String("username", me.Username))
-	return domain.BotIdentity{ID: me.ID, Username: me.Username}, nil
+	return domain.BotIdentity{ID: me.ID, Username: me.Username, HasTopicsEnabled: me.HasTopicsEnabled}, nil
 }
 
 // Candidates starts polling and streams groups until ctx is done or Close
@@ -130,6 +135,33 @@ func (p *Probe) stop() {
 	}
 }
 
+// Bind sets the one-time code the wizard put into its link
+// (domain.SetupLink). From then on only the user who sends
+// "/start setup_<code>" gets the group button and may choose the group;
+// everyone else who finds the bot during setup is ignored.
+func (p *Probe) Bind(code string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.code, p.owner = code, 0
+}
+
+// allowPrivate reports whether a private message may drive setup, binding
+// the sender as the owner when it carries the code.
+func (p *Probe) allowPrivate(m *models.Message) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	switch {
+	case p.code == "":
+		return true
+	case p.owner != 0:
+		return m.From.ID == p.owner
+	case m.ChatShared == nil && m.Text == "/start "+domain.SetupStartPrefix+p.code:
+		p.owner = m.From.ID
+		return true
+	}
+	return false
+}
+
 // Process feeds one update to the probe's handlers, bypassing polling. It
 // exists for tests; the daemon never calls it.
 func (p *Probe) Process(ctx context.Context, u *models.Update) {
@@ -140,6 +172,10 @@ func (p *Probe) Process(ctx context.Context, u *models.Update) {
 // the group choice, anything else (typically /start) gets the button.
 func (p *Probe) onPrivate(ctx context.Context, b *bot.Bot, u *models.Update) {
 	m := u.Message
+	if !p.allowPrivate(m) {
+		p.log.Info("[FIX] setup probe: private message from a user without the setup code ignored", slog.Int64("from_id", m.From.ID))
+		return
+	}
 	if m.ChatShared != nil {
 		p.onChatShared(ctx, b, m)
 		return
@@ -220,6 +256,18 @@ func (p *Probe) onChatShared(ctx context.Context, b *bot.Bot, m *models.Message)
 // the flag is optional on the wire.
 func (p *Probe) onMember(ctx context.Context, b *bot.Bot, u *models.Update) {
 	cm := u.MyChatMember
+	if cm.From.IsBot || cm.From.ID == groupAnonymousBot {
+		p.log.Warn("[FIX] setup probe: promotion by an anonymous admin or a bot ignored; promote the bot as yourself",
+			slog.Int64("chat_id", cm.Chat.ID), slog.Int64("from_id", cm.From.ID))
+		return
+	}
+	p.mu.Lock()
+	owner := p.owner
+	p.mu.Unlock()
+	if owner != 0 && cm.From.ID != owner {
+		p.log.Info("[FIX] setup probe: promotion by another user than the one running setup ignored", slog.Int64("chat_id", cm.Chat.ID), slog.Int64("from_id", cm.From.ID))
+		return
+	}
 	if !canManageTopics(cm.NewChatMember) {
 		p.log.Debug("setup probe: membership change without topic rights",
 			slog.Int64("chat_id", cm.Chat.ID), slog.String("status", string(cm.NewChatMember.Type)))

@@ -63,7 +63,7 @@ Anything you write in a topic reaches the agent:
 | `/screen 40` | the visible screen's last 40 lines (max 200), never the reply; the input frame is cut afterwards, so an idle Claude Code pane may answer with fewer than 40 lines |
 | `/screen all` | everything the agent printed since your last message (typed in Herdr or sent here); long output arrives as a `.txt` file |
 | `/focus` | the pane is brought to the front in Herdr |
-| `/git status`, `/git diff`, `/git diff staged`, `/git log [N]` | `git status --short --branch`, `git diff HEAD`, `git diff --cached` or `git log --oneline --decorate -n N` (default 10, at most 50) run by the daemon in the agent's working directory (`cwd` from `agent.list`), colour and pager off, 10 s timeout. Up to 3600 characters come back as a quoted code block; longer output as a `<repo>-<sub>-<hhmmss>.patch` (diff) or `.txt` file with a caption naming the argv and the line count (5 MB cap, `truncated` when cut). Empty output answers `clean`, `no changes` or `no commits`. Anything else after `/git` (a path, a flag, another subcommand) answers `usage: /git status \| diff [staged] \| log [N]`; nothing typed on the phone reaches git. Failures: `⚠️ not a git repository: <cwd>`, `⚠️ git is not installed`, `⚠️ git timed out`, `⚠️ Herdr reports no working directory`. Secret redaction applies to the output like to any post |
+| `/git status`, `/git diff`, `/git diff staged`, `/git log [N]` | `git status --short --branch`, `git diff HEAD`, `git diff --cached` or `git log --oneline --decorate -n N` (default 10, at most 50) run by the daemon in the agent's working directory (`cwd` from `agent.list`), colour and pager off, 10 s timeout. Up to 3600 characters come back as a quoted code block; longer output as a `<repo>-<sub>-<hhmmss>.patch` (diff) or `.txt` file with a caption naming the argv and the line count (5 MB cap, `truncated` when cut). Empty output answers `clean`, `no changes` or `no commits`. Anything else after `/git` (a path, a flag, another subcommand) answers `usage: /git status \| diff [staged] \| log [N]`; nothing typed on the phone reaches git. Failures: `⚠️ not a git repository`, `⚠️ git is not installed`, `⚠️ git timed out`, `⚠️ Herdr reports no working directory`. Secret redaction applies to the output like to any post |
 | `/stop` | `esc` through `agent.send_keys`, in any status: Claude Code cancels the running turn or dismisses the open dialog; the reply is `⏹ sent esc` |
 | `/interrupt` | `ctrl+c` through `agent.send_keys`, in any status: a hard interrupt; the reply is `⛔ sent ctrl+c` |
 | `/close` | the question `Close <label>? The pane and its tab go away.` with `Yes, close` / `No` buttons; `Yes` closes the pane through `pane.close` (the tab goes with it when it held nothing else) and the topic gets 🏁 through the usual exit path; `No` keeps everything. Only the latest question of an agent acts; see [Questions and buttons](behaviour.md#questions-and-buttons) |
@@ -182,6 +182,64 @@ or cannot write to any operator's private chat while `Questions in the
 bot's chat` is on (`⚠️ questions will ring in the topics …`). Above them
 sits the pinned dashboard: one message, edited in place, with every live
 agent, its status and how long it has been in it.
+
+## Sharing an agent privately
+
+Private sharing uses the same bot and daemon as the owner group. Enable
+**Threads Settings → Threaded Mode** for that bot in BotFather. The sharing panel refreshes the bot's
+capability when granting access; the owner group still works if it is disabled.
+
+1. The recipient sends `/start` or another message directly to the bot. A genuine
+   private contact registers their numeric Telegram ID; forwarding someone else's
+   message does not register that person. Registration grants no access and does
+   not forward the message or download its attachment.
+2. In the owner's agent topic, an operator sends `/share`. Select the recipient
+   by numeric ID. `/share alice` searches names, usernames and IDs; use the page
+   buttons for more than ten contacts. Duplicate display names are allowed.
+3. Choose **Read** (the default) or **Control**, optional capabilities, and an
+   expiry: one hour, one day, seven days, or no expiry. Review and confirm.
+4. The recipient gets a private agent topic and an access card. Existing output
+   is not replayed. New output is shared, including results of owner prompts.
+5. Use `/shares` in the owner topic to change rights or expiry, suspend/resume,
+   revoke, repair an uncertain topic creation, or explicitly delete its history.
+   In General, `/shares` covers all agents and `/share` manages the directory.
+   Hiding a contact does not revoke their existing grants.
+
+To retain grants across plugin restarts, install the integration for the agent
+being shared, for example `herdr integration install codex` or
+`herdr integration install claude`. `herdr integration status` reports what is
+installed. Herdr must receive a genuine session-start report before it can
+identify the session. A grant initially created without identity needs one new
+owner confirmation after identity becomes available; subsequent plugin restarts
+can preserve grants for that verified session. See
+[Herdr integrations](https://herdr.dev/docs/integrations/).
+
+**Control uses the existing session and its filesystem/tool permissions.**
+Owners and other controllers retain access. It does not isolate the recipient's
+requests in a separate operating-system account.
+
+| Private action | Required access |
+| --- | --- |
+| `/agents`, `/status`, `/help`, `/screen [N]` | Read or Control |
+| `/screen all` | History captured after this grant's activation |
+| Prompts, supported files, dialog buttons, `/keys`, `/stop`, `/interrupt` | Control |
+| `/clear`, `/compact`, `/usage`, `/model` | Control; Claude Code only |
+| `/git status`, `/git diff`, `/git log` | Control, or Read with repository-read enabled |
+| `/close` | Control plus close-agent permission; separate confirmation |
+| `/focus` | Control plus local-focus permission |
+| `/pause`, `/resume`, `/alias NAME` | Local mirror settings; Read or Control |
+| `/silent`, `/display screen\|reply\|formatted`, `/fold 0..200`, `/metadata` | Local display and notification settings |
+
+`/silent` and `/metadata` toggle their settings. `/alias` without a name restores
+the agent label. Pausing suppresses automatic output and status edits; explicit
+screen requests still work. Resuming requests at most the current relevant
+update. Global owner administration and unknown slash commands are refused in
+private topics, even when the recipient is also an owner operator.
+
+`/agents` opens a scoped service topic with status/screen/pause buttons. Its bot
+links identify only an opaque mirror reference and recheck the actual sender.
+Telegram may require manually opening the topic after following a link. Private
+navigation does not use group `t.me/c` links.
 
 ## See Also
 

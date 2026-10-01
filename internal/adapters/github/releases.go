@@ -4,6 +4,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -32,6 +33,66 @@ type Source struct {
 	OS           string
 	Arch         string
 	Log          *slog.Logger
+	// CheckURL vets asset and checksum URLs taken from API JSON; nil means
+	// assetURLAllowed. Tests that serve assets locally replace it.
+	CheckURL func(*url.URL) error
+}
+
+// assetHosts may appear in a release's browser_download_url.
+var assetHosts = map[string]bool{"github.com": true, "api.github.com": true}
+
+// redirectHosts may be reached by a redirect from GitHub: its own hosts
+// plus the asset storage hosts downloads are sent to. GitHub changes the
+// storage host from time to time; this is the one list to update.
+var redirectHosts = map[string]bool{
+	"github.com":                           true,
+	"api.github.com":                       true,
+	"raw.githubusercontent.com":            true,
+	"objects.githubusercontent.com":        true,
+	"release-assets.githubusercontent.com": true,
+}
+
+// maxRedirects bounds one request's redirect chain.
+const maxRedirects = 5
+
+var errURLNotAllowed = errors.New("URL not allowed")
+
+// assetURLAllowed accepts only https URLs without credentials on GitHub's
+// own hosts.
+func assetURLAllowed(u *url.URL) error {
+	if u.Scheme != "https" || u.User != nil || !assetHosts[strings.ToLower(u.Hostname())] || u.Port() != "" {
+		return fmt.Errorf("%w: %s://%s", errURLNotAllowed, u.Scheme, u.Host)
+	}
+	return nil
+}
+
+// checkRedirect keeps redirects on https and the GitHub hosts.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("stopped after %d redirects", maxRedirects)
+	}
+	if req.URL.Scheme != "https" || !redirectHosts[strings.ToLower(req.URL.Hostname())] {
+		return fmt.Errorf("redirect %w: %s://%s", errURLNotAllowed, req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
+// NewHTTPClient is the release client: bounded time and GitHub-only
+// redirects.
+func NewHTTPClient() *http.Client {
+	return &http.Client{Timeout: 10 * time.Second, CheckRedirect: checkRedirect}
+}
+
+// allowed applies CheckURL or the default allow-list to raw.
+func (s *Source) allowed(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errURLNotAllowed, err)
+	}
+	if s.CheckURL != nil {
+		return s.CheckURL(u)
+	}
+	return assetURLAllowed(u)
 }
 
 var checksumPattern = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
@@ -59,7 +120,7 @@ type apiRelease struct {
 func (s *Source) Latest(ctx context.Context, installed domain.Version) (domain.Release, bool, error) {
 	client := s.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = NewHTTPClient()
 	}
 	log := s.Log
 	if log == nil {
@@ -70,6 +131,9 @@ func (s *Source) Latest(ctx context.Context, installed domain.Version) (domain.R
 		base = defaultURL
 	}
 	asset := s.assetName()
+	// A stable installation is offered stable releases only; an installed
+	// prerelease opted into testing.
+	stableOnly := len(installed.Pre) == 0
 
 	next, err := url.Parse(base)
 	if err != nil {
@@ -136,6 +200,10 @@ func (s *Source) Latest(ctx context.Context, installed domain.Version) (domain.R
 				log.Warn("release tag ignored", slog.String("tag", rel.Tag), slog.String("class", "invalid_version"))
 				continue
 			}
+			if stableOnly && (rel.Prerelease || len(v.Pre) > 0) {
+				log.Debug("[FIX] prerelease skipped", slog.String("tag", rel.Tag))
+				continue
+			}
 			key := fmt.Sprintf("%d.%d.%d-%s", v.Major, v.Minor, v.Patch, strings.Join(v.Pre, "."))
 			if seenVersions[key] {
 				log.Warn("duplicate release version", slog.String("tag", rel.Tag))
@@ -148,6 +216,10 @@ func (s *Source) Latest(ctx context.Context, installed domain.Version) (domain.R
 			var binaryURL, checksumsURL string
 			for _, a := range rel.Assets {
 				if a.State != "uploaded" || a.URL == "" {
+					continue
+				}
+				if err := s.allowed(a.URL); err != nil {
+					log.Warn("[FIX] release asset URL rejected", slog.String("tag", rel.Tag), slog.String("asset", a.Name), slog.String("err", err.Error()))
 					continue
 				}
 				if a.Name == asset {
@@ -212,9 +284,14 @@ func (s *Source) Checksum(ctx context.Context, release domain.Release) (string, 
 	if release.AssetURL == "" || release.ChecksumsURL == "" {
 		return "", fmt.Errorf("release %s is missing the host binary or checksums.txt", release.Tag)
 	}
+	for _, raw := range []string{release.AssetURL, release.ChecksumsURL} {
+		if err := s.allowed(raw); err != nil {
+			return "", fmt.Errorf("release %s: %w", release.Tag, err)
+		}
+	}
 	client := s.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = NewHTTPClient()
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
@@ -271,7 +348,7 @@ func (s *Source) Manifest(ctx context.Context, release domain.Release) (domain.R
 	address := strings.TrimRight(base, "/") + "/" + url.PathEscape(release.Tag) + "/herdr-plugin.toml"
 	client := s.Client
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = NewHTTPClient()
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

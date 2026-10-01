@@ -138,6 +138,10 @@ func isMarkupError(err error) bool {
 // (400, 401, 403, 404, 409, chat migration) and a cancelled context are
 // final; 429, 5xx, transport and decode errors are worth another try.
 func isRetryable(err error) bool {
+	var once noRetryError
+	if errors.As(err, &once) {
+		return false
+	}
 	var api *APIError
 	switch {
 	case err == nil:

@@ -139,6 +139,12 @@ const (
 	// ChoiceSourceMegabytes is the static list of file sizes offered for
 	// OptionInboxMaxMB (see MegabytesChoices).
 	ChoiceSourceMegabytes = "megabytes"
+	// OptionInboxMaxTotalMB is the most the inbox holds in total, in
+	// megabytes; the oldest files go first when a new one does not fit.
+	OptionInboxMaxTotalMB = "inbox.max_total_mb"
+	// ChoiceSourceQuota is the static list of totals offered for
+	// OptionInboxMaxTotalMB (see QuotaChoices).
+	ChoiceSourceQuota = "quota"
 	// Group names, in the panel's display order.
 	GroupSync       = "sync"
 	GroupQuiet      = "quiet"
@@ -349,6 +355,16 @@ func buildOptionSpecs() []OptionSpec {
 			Validate:    validateMegabytes,
 		},
 		{
+			Key:         OptionInboxMaxTotalMB,
+			Group:       GroupInbox,
+			Title:       "Inbox size",
+			Description: "The most all inbox files may take together. When a new file does not fit, the oldest files are deleted first.",
+			Kind:        KindChoice,
+			Default:     "500",
+			Choices:     ChoiceSourceQuota,
+			Validate:    validateQuota,
+		},
+		{
 			Key:         OptionInboxDeleteAfterDays,
 			Group:       GroupInbox,
 			Title:       "Delete files after",
@@ -491,12 +507,28 @@ const maxInboxMB = 20
 // MB.
 func MegabytesChoices() []string { return append([]string(nil), megabytesChoices...) }
 
+// quotaChoices is the list the panel offers for OptionInboxMaxTotalMB.
+var quotaChoices = []string{"100", "250", "500", "1000", "2000"}
+
+// defaultInboxTotalMB is the OptionInboxMaxTotalMB default, also used for
+// an unparsable value; maxInboxTotalMB bounds a hand-edited one.
+const (
+	defaultInboxTotalMB = 500
+	maxInboxTotalMB     = 100000
+)
+
+// QuotaChoices returns the inbox totals the panel offers: 100, 250, 500,
+// 1000 and 2000 MB.
+func QuotaChoices() []string { return append([]string(nil), quotaChoices...) }
+
 // StaticChoices answers the choice lists the domain owns itself; the
 // application layer asks it before the external ChoiceSource.
 func StaticChoices(name string) ([]string, bool) {
 	switch name {
 	case ChoiceSourceMegabytes:
 		return MegabytesChoices(), true
+	case ChoiceSourceQuota:
+		return QuotaChoices(), true
 	case ChoiceSourceDays:
 		return DaysChoices(), true
 	case ChoiceSourceMinutes:
@@ -535,6 +567,14 @@ func validateMegabytes(value string) error {
 	n, err := strconv.Atoi(strings.TrimSpace(value))
 	if err != nil || n < 1 || n > maxInboxMB {
 		return fmt.Errorf("%q is not a megabyte count between 1 and %d: %w", value, maxInboxMB, ErrInvalidOption)
+	}
+	return nil
+}
+
+func validateQuota(value string) error {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 1 || n > maxInboxTotalMB {
+		return fmt.Errorf("%q is not a megabyte count between 1 and %d: %w", value, maxInboxTotalMB, ErrInvalidOption)
 	}
 	return nil
 }
@@ -583,6 +623,12 @@ func ChoiceLabel(spec OptionSpec, value string) string {
 			return fmt.Sprintf("%d s", n)
 		}
 	case ChoiceSourceMegabytes:
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return value
+		}
+		return fmt.Sprintf("%d MB", n)
+	case ChoiceSourceQuota:
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
 			return value
@@ -650,6 +696,12 @@ func ChoiceButton(spec OptionSpec, value string) string {
 			return fmt.Sprintf("%ds", n)
 		}
 	case ChoiceSourceMegabytes:
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return value
+		}
+		return fmt.Sprintf("%dMB", n)
+	case ChoiceSourceQuota:
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
 			return value
@@ -867,6 +919,16 @@ func (o Options) InboxMaxBytes() int64 {
 		n = maxInboxMB
 	}
 	return int64(n) * 1024 * 1024
+}
+
+// InboxMaxTotalBytes is the most the inbox holds in total, in bytes; the
+// default for an unparsable value.
+func (o Options) InboxMaxTotalBytes() int64 {
+	n, err := strconv.Atoi(strings.TrimSpace(o.String(OptionInboxMaxTotalMB)))
+	if err != nil || n < 1 || n > maxInboxTotalMB {
+		n = defaultInboxTotalMB
+	}
+	return int64(n) << 20
 }
 
 // InboxDeleteAfter is the age at which the sweep deletes an inbox file;

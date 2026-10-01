@@ -481,3 +481,25 @@ func TestCaptureShortFlapDoesNotMark(t *testing.T) {
 		t.Fatalf("mark after a real pause: first line %q, want L17", lines[0])
 	}
 }
+
+func TestPrivateHistoryUsesActivationBoundary(t *testing.T) {
+	clock := testkit.NewFakeClock(time.Unix(100, 0))
+	c := NewCapture(testkit.NewFakeHerdr(nil), func() []domain.Agent { return nil }, clock, nil)
+	key := domain.Key{PaneID: "p", TerminalID: "t", SessionDigest: "verified"}
+	c.recordPrivateFrame(key, "old owner history")
+	activation := clock.Now()
+	clock.Advance(time.Second)
+	c.recordPrivateFrame(key, "permitted new output")
+	if got := c.PrivateSince(key, activation); strings.Contains(got, "old owner") || !strings.Contains(got, "permitted") {
+		t.Fatal("history crossed activation")
+	}
+	regrant := clock.Now()
+	if got := c.PrivateSince(key, regrant); got != "" {
+		t.Fatal("regrant revived previous grant history")
+	}
+	other := key
+	other.SessionDigest = "replacement"
+	if got := c.PrivateSince(other, time.Time{}); got != "" {
+		t.Fatal("replacement session inherited private history")
+	}
+}

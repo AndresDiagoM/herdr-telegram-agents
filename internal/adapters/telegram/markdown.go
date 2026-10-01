@@ -1,6 +1,8 @@
 package telegram
 
 import (
+	"html"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +35,7 @@ var (
 	mdStrike    = regexp.MustCompile(`(?s)~~(.+?)~~`)
 	mdStash     = regexp.MustCompile("\x00(\\d+)\x00")
 	mdLang      = regexp.MustCompile(`^[A-Za-z0-9_+#.-]+$`)
+	mdHost      = regexp.MustCompile(`^(?:[A-Za-z0-9-]+\.)*[A-Za-z0-9-]+$|^\[[0-9A-Fa-f:.]+\]$`)
 )
 
 // mdRuleLine replaces a horizontal rule; Telegram has no tag for one. It
@@ -151,11 +154,7 @@ func renderInline(text string) string {
 
 	text = mdLink.ReplaceAllStringFunc(text, func(m string) string {
 		sm := mdLink.FindStringSubmatch(m)
-		label := sm[1]
-		if label == "" {
-			label = sm[2]
-		}
-		return `<a href="` + attrEscaper.Replace(sm[2]) + `">` + label + "</a>"
+		return mdAnchor(m, sm[1], sm[2])
 	})
 	text = mdBoldItal.ReplaceAllString(text, "<b><i>$1</i></b>")
 	text = mdBold.ReplaceAllString(text, "<b>$1</b>")
@@ -170,6 +169,53 @@ func renderInline(text string) string {
 		}
 		return "<code>" + htmlEscaper.Replace(stash[n]) + "</code>"
 	})
+}
+
+// mdAnchor renders one [label](href) match, label and href already
+// HTML-escaped. Only http and https links with a host become anchors; any
+// other scheme (tg:, javascript:, a relative path) stays the escaped source
+// text. A label that is itself a URL must name the href's host, otherwise
+// the href is shown instead; any other label gets the host appended so the
+// reader always sees where the link goes.
+func mdAnchor(source, label, href string) string {
+	u, err := url.Parse(html.UnescapeString(href))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || !mdHost.MatchString(hostOnly(u)) {
+		return source
+	}
+	host := htmlEscaper.Replace(u.Hostname())
+	switch {
+	case label == "" || label == href:
+		label = href
+	case labelHost(html.UnescapeString(label)) != "":
+		if !strings.EqualFold(labelHost(html.UnescapeString(label)), u.Hostname()) {
+			label = href
+		}
+	case !strings.Contains(strings.ToLower(label), strings.ToLower(host)):
+		return `<a href="` + attrEscaper.Replace(href) + `">` + label + "</a> (" + host + ")"
+	}
+	return `<a href="` + attrEscaper.Replace(href) + `">` + label + "</a>"
+}
+
+// hostOnly is the URL's host without the port, IPv6 brackets kept.
+func hostOnly(u *url.URL) string {
+	if p := u.Port(); p != "" {
+		return strings.TrimSuffix(u.Host, ":"+p)
+	}
+	return u.Host
+}
+
+// labelHost returns the host a link label claims to point at, or "" when
+// the label does not look like a URL.
+func labelHost(label string) string {
+	label = strings.TrimSpace(label)
+	if strings.HasPrefix(strings.ToLower(label), "www.") {
+		label = "https://" + label
+	}
+	u, err := url.Parse(label)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // splitMarkdown cuts Markdown into parts of at most max UTF-16 code units

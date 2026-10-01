@@ -1,0 +1,541 @@
+package app
+
+import (
+	"context"
+	"crypto/rand"
+	"errors"
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/permgps/herdr-telegram-agents/internal/domain"
+)
+
+// PrivateControl is confined to the shared bridge worker, so owner and guest
+// Herdr mutations serialize. Downloads and git run asynchronously; their
+// completion returns to that worker carrying the original grant revision.
+type PrivateControl struct {
+	dashboardAfter  int64
+	Dashboard       *PrivateDashboard
+	Output          *PrivateOutput
+	followups       []privateFollowup
+	Sharing         *Sharing
+	Telegram        domain.DestinationTelegram
+	Transport       domain.TelegramGateway
+	Herdr           domain.HerdrGateway
+	Git             domain.GitRunner
+	Inbox           domain.InboxStore
+	Agent           func(domain.Key) (domain.Agent, bool)
+	Now             func() time.Time
+	Async           func(func(context.Context) func(context.Context) error) bool
+	Read            func(context.Context, domain.ShareOrigin, domain.Command) error
+	Overview        func(context.Context, domain.PrivateMessage) error
+	InvalidateOwner func(context.Context, domain.Key) error
+	callbacks       map[string]privateButton
+	typing          map[domain.Key]domain.ShareOrigin
+	albums          map[string]*privateAlbum
+	denialNotices   map[string]uint64
+}
+
+type privateButton struct {
+	surface domain.TopicAddress
+	origin  domain.ShareOrigin
+	message int
+	keys    []string
+	kind    string
+	expires time.Time
+}
+
+type privateAlbum struct {
+	origin      domain.ShareOrigin
+	attachments []domain.TopicAttachment
+	caption     string
+	due         time.Time
+}
+
+const privateHelp = "Shared agent commands: /help, /status, /agents, /screen [N|all]. Control also permits prompts, attachments, /keys, /stop, /interrupt, /clear, /compact, /usage and /model. Repository, close and focus permissions are checked separately. /pause, /resume and /alias affect only this mirror."
+
+func (p *PrivateControl) Handle(ctx context.Context, e domain.PrivateMessage) error {
+	if e.FirstContact {
+		_, err := p.Telegram.SendAt(ctx, e.Address, domain.Outgoing{Text: "You are registered. The owner can now share an agent with you. This message has not been sent to an agent."}, nil)
+		return err
+	}
+	if e.Text == "" && e.Attachment == nil && e.CallbackID == "" {
+		return p.notice(ctx, e, "This media is not supported for agent input. Your contact is registered.")
+	}
+	if p.Dashboard != nil {
+		if handled, err := p.Dashboard.Local(ctx, e); handled {
+			return err
+		}
+	}
+	if e.CallbackID != "" {
+		return p.press(ctx, e)
+	}
+	st, _ := p.Sharing.Snapshot()
+	service := st.ServiceTopics[e.Contact.ActorID] == e.Address
+	if p.Overview != nil && (service || e.Address.ThreadID == 0 || strings.HasPrefix(e.Text, "/agents") || strings.HasPrefix(e.Text, "/start")) {
+		return p.Overview(ctx, e)
+	}
+	o, ok := p.resolve(e)
+	if !ok {
+		return p.notice(ctx, e, "No active shared agent in this topic. Use /agents.")
+	}
+	a, ok := p.Agent(o.Key)
+	if !ok {
+		return p.notice(ctx, e, "The shared agent is unavailable.")
+	}
+	cmd := domain.Route(e.Text, "", a.Status)
+	if waiting, exists := p.typing[o.Key]; exists && !strings.HasPrefix(strings.TrimSpace(e.Text), "/") && e.Attachment == nil {
+		if waiting.ActorID != o.ActorID || waiting.GrantID != o.GrantID || waiting.Revision != o.Revision {
+			return p.notice(ctx, e, "Another controller is entering a dialog answer.")
+		}
+		cmd = domain.Command{Kind: domain.CmdPrompt, Text: e.Text}
+	}
+	action, allowed := domain.ShareCommandAction(cmd)
+	if e.Attachment != nil {
+		action = domain.ShareAttachment
+		allowed = true
+	}
+	if !allowed {
+		return p.notice(ctx, e, privateHelp)
+	}
+	if e.Stale && action != domain.ShareScreen && action != domain.ShareHistory && action != domain.ShareOverview {
+		return p.notice(ctx, e, "This message predates startup. Please resend it.")
+	}
+	callCtx, done, decision := p.Sharing.Begin(ctx, o, action)
+	if !decision.Allowed {
+		return p.notice(ctx, e, "This action is not permitted by your current access.")
+	}
+	done() // Receipt admission only. Every effect below starts a fresh dispatch.
+	_ = callCtx
+	if e.Attachment != nil {
+		return p.attachment(ctx, o, *e.Attachment)
+	}
+	switch cmd.Kind {
+	case domain.CmdHelp:
+		return p.send(ctx, o, privateHelp)
+	case domain.CmdStatus:
+		return p.send(ctx, o, a.Name+" · "+string(a.Status))
+	case domain.CmdScreen:
+		if p.Read != nil {
+			return p.Read(ctx, o, cmd)
+		}
+		return p.screen(ctx, o, cmd.Lines)
+	case domain.CmdPrompt:
+		if waiting, exists := p.typing[o.Key]; exists {
+			if waiting.ActorID != o.ActorID || waiting.GrantID != o.GrantID || waiting.Revision != o.Revision {
+				return p.notice(ctx, e, "Another controller is entering a dialog answer. Retry after it finishes.")
+			}
+			delete(p.typing, o.Key)
+		}
+		return p.effect(ctx, o, action, func(ctx context.Context) error { return p.Herdr.Prompt(ctx, o.Key.PaneID, cmd.Text) })
+	case domain.CmdKeys:
+		return p.keys(ctx, o, cmd.Keys)
+	case domain.CmdStop:
+		return p.keys(ctx, o, []string{domain.KeyEscape})
+	case domain.CmdInterrupt:
+		return p.keys(ctx, o, []string{domain.KeyInterrupt})
+	case domain.CmdForward:
+		if a.Kind != "claude" {
+			return p.send(ctx, o, "This command is supported only for Claude Code.")
+		}
+		if cmd.Text == "/clear" && a.Status != domain.StatusIdle && a.Status != domain.StatusDone {
+			return p.send(ctx, o, "Wait until the agent is idle before /clear.")
+		}
+		err := p.effect(ctx, o, domain.ShareForward, func(ctx context.Context) error { return p.Herdr.Prompt(ctx, o.Key.PaneID, cmd.Text) })
+		if err == nil && cmd.Forward.Post != domain.ForwardPostNone {
+			p.followups = append(p.followups, privateFollowup{origin: o, due: p.Now().Add(2 * time.Second), dismiss: cmd.Forward.Dismiss})
+		}
+		return err
+	case domain.CmdFocus:
+		return p.effect(ctx, o, domain.ShareFocus, func(ctx context.Context) error { return p.Herdr.Focus(ctx, o.Key.PaneID) })
+	case domain.CmdClose:
+		return p.confirmClose(ctx, o)
+	case domain.CmdGit:
+		return p.git(ctx, o, a, cmd)
+	}
+	return nil
+}
+
+func (p *PrivateControl) resolve(e domain.PrivateMessage) (domain.ShareOrigin, bool) {
+	st, ok := p.Sharing.Snapshot()
+	if !ok {
+		return domain.ShareOrigin{}, false
+	}
+	for id, m := range st.Mirrors {
+		if m.Address == e.Address {
+			o, ok := p.Sharing.Origin(id)
+			o.ActorID = e.Contact.ActorID
+			o.MessageID = e.MessageID
+			return o, ok
+		}
+	}
+	return domain.ShareOrigin{}, false
+}
+
+func (p *PrivateControl) notice(ctx context.Context, e domain.PrivateMessage, text string) error {
+	_, err := p.Telegram.SendAt(ctx, e.Address, domain.Outgoing{Text: text, ReplyTo: e.MessageID, MaxParts: 1}, nil)
+	return err
+}
+func (p *PrivateControl) send(ctx context.Context, o domain.ShareOrigin, text string) error {
+	_, err := p.Telegram.SendAt(ctx, o.Address, domain.Outgoing{Text: text, ReplyTo: o.MessageID, MaxParts: 4}, p.Sharing.Guard(o, domain.ShareOutput))
+	return err
+}
+
+func (p *PrivateControl) effect(ctx context.Context, o domain.ShareOrigin, action domain.ShareAction, run func(context.Context) error) error {
+	_, release, decision := p.Sharing.Begin(ctx, o, action)
+	if !decision.Allowed {
+		return errors.New("private action authorization expired")
+	}
+	release()
+	if err := p.Invalidate(ctx, o.Key); err != nil {
+		return err
+	}
+	callCtx, done, d := p.Sharing.Begin(ctx, o, action)
+	if !d.Allowed {
+		return errors.New("private action authorization expired")
+	}
+	defer done()
+	err := run(callCtx)
+	p.Sharing.log.Info("private agent action", "actor_id", o.ActorID, "grant_id", o.GrantID, "action", string(action), "success", err == nil)
+	if err != nil {
+		_ = p.send(ctx, o, "The agent action failed. It was not retried.")
+		return errors.New("private agent action failed")
+	}
+	return p.Telegram.ReactAt(ctx, domain.MessageAddress{ChatID: o.Address.ChatID, MessageID: o.MessageID}, "👍", p.Sharing.Guard(o, domain.ShareOutput))
+}
+
+func (p *PrivateControl) keys(ctx context.Context, o domain.ShareOrigin, keys []string) error {
+	return p.effect(ctx, o, domain.ShareKeys, func(ctx context.Context) error { return p.Herdr.SendKeys(ctx, o.Key.PaneID, keys) })
+}
+
+func (p *PrivateControl) screen(ctx context.Context, o domain.ShareOrigin, lines int) error {
+	callCtx, done, d := p.Sharing.Begin(ctx, o, domain.ShareScreen)
+	if !d.Allowed {
+		return errors.New("screen access denied")
+	}
+	defer done()
+	if lines == 0 {
+		lines = domain.MaxScreenLines
+	}
+	screen, err := p.Herdr.ReadScreen(callCtx, o.Key.PaneID, domain.ScreenVisible, lines)
+	if err != nil {
+		return p.send(ctx, o, "Screen unavailable.")
+	}
+	clean, _ := domain.CutChrome(screen.Text)
+	_, err = p.Telegram.SendAt(ctx, o.Address, domain.Outgoing{Text: clean, Code: true, ReplyTo: o.MessageID, MaxParts: 4}, p.Sharing.Guard(o, domain.ShareScreen))
+	return err
+}
+
+func (p *PrivateControl) confirmClose(ctx context.Context, o domain.ShareOrigin) error {
+	ref := p.button(privateButton{origin: o, kind: "close", expires: p.Now().Add(time.Minute)})
+	id, err := p.Telegram.SendAt(ctx, o.Address, domain.Outgoing{Text: "Close this agent's pane for everyone?", Buttons: []domain.Button{{Text: "Confirm close", Data: ref}}}, p.Sharing.Guard(o, domain.ShareClose))
+	b := p.callbacks[ref]
+	b.message = id
+	p.callbacks[ref] = b
+	return err
+}
+
+func (p *PrivateControl) button(b privateButton) string {
+	if p.callbacks == nil {
+		p.callbacks = map[string]privateButton{}
+	}
+	for id, old := range p.callbacks {
+		if !p.Now().Before(old.expires) {
+			delete(p.callbacks, id)
+		}
+	}
+	if len(p.callbacks) >= 4096 {
+		return "expired"
+	}
+	id := "pm:" + rand.Text()
+	p.callbacks[id] = b
+	return id
+}
+
+func (p *PrivateControl) press(ctx context.Context, e domain.PrivateMessage) error {
+	b, ok := p.callbacks[e.CallbackData]
+	surface := b.surface
+	if surface.ChatID == 0 {
+		surface = b.origin.Address
+	}
+	if !ok || e.Stale || e.Contact.ActorID != b.origin.ActorID || e.Address != surface || e.MessageID != b.message || !p.Now().Before(b.expires) {
+		return p.Transport.AnswerButton(ctx, e.CallbackID, "This button is stale or unavailable.")
+	}
+	_ = p.Transport.AnswerButton(ctx, e.CallbackID, "")
+	delete(p.callbacks, e.CallbackData)
+	o := b.origin
+	o.MessageID = e.MessageID
+	switch b.kind {
+	case "status":
+		a, _ := p.Agent(o.Key)
+		return p.send(ctx, o, a.Name+" · "+string(a.Status))
+	case "screen":
+		if p.Read != nil {
+			return p.Read(ctx, o, domain.Command{Kind: domain.CmdScreen})
+		}
+		return p.screen(ctx, o, 0)
+	case "pause":
+		if p.Dashboard != nil {
+			e.Address = o.Address
+			e.Text = "/pause"
+			_, err := p.Dashboard.Local(ctx, e)
+			return err
+		}
+	}
+	if b.kind == "close" {
+		return p.effect(ctx, o, domain.ShareClose, func(ctx context.Context) error { return p.Herdr.ClosePane(ctx, o.Key.PaneID) })
+	}
+	err := p.effect(ctx, o, domain.ShareDialog, func(ctx context.Context) error { return p.Herdr.SendKeys(ctx, o.Key.PaneID, b.keys) })
+	if err == nil && b.kind == "text" {
+		if p.typing == nil {
+			p.typing = map[domain.Key]domain.ShareOrigin{}
+		}
+		p.typing[o.Key] = o
+	}
+	if err == nil && p.Output != nil {
+		p.Output.Refresh(o.Key)
+	}
+	return err
+}
+
+// Invalidate removes every mirror's callbacks before a controller acts.
+func (p *PrivateControl) InvalidatePrivate(ctx context.Context, key domain.Key) error {
+	delete(p.typing, key)
+	messages := map[domain.MessageAddress]domain.ShareOrigin{}
+	for ref, b := range p.callbacks {
+		if b.origin.Key == key {
+			delete(p.callbacks, ref)
+			if b.message > 0 {
+				messages[domain.MessageAddress{ChatID: b.origin.Address.ChatID, MessageID: b.message}] = b.origin
+			}
+		}
+	}
+	for m, o := range messages {
+		_ = p.Telegram.EditButtonsAt(ctx, m, nil, p.Sharing.Guard(o, domain.ShareOutput))
+	}
+	return nil
+}
+
+func (p *PrivateControl) git(ctx context.Context, o domain.ShareOrigin, a domain.Agent, cmd domain.Command) error {
+	if p.Git == nil || p.Async == nil {
+		return p.send(ctx, o, "Repository commands unavailable.")
+	}
+	if cmd.Git.Sub == "" {
+		return p.send(ctx, o, domain.GitUsage)
+	}
+	accepted := p.Async(func(ctx context.Context) func(context.Context) error {
+		callCtx, done, d := p.Sharing.Begin(ctx, o, domain.ShareGit)
+		if !d.Allowed {
+			return nil
+		}
+		defer done()
+		result, err := p.Git.Run(callCtx, a.Cwd, cmd.Git.Args)
+		return func(ctx context.Context) error {
+			if err != nil {
+				return p.send(ctx, o, "Repository command failed.")
+			}
+			if len(result.Output) > 256<<10 {
+				result.Output = result.Output[:256<<10]
+			}
+			return p.Telegram.DocumentAt(ctx, o.Address, domain.Document{Name: "git-" + cmd.Git.Sub + ".txt", Data: []byte(result.Output), ReplyTo: o.MessageID}, p.Sharing.Guard(o, domain.ShareGit))
+		}
+	})
+	if !accepted {
+		return p.send(ctx, o, "Private transfers are busy. Retry shortly.")
+	}
+	return nil
+}
+
+func (p *PrivateControl) attachment(ctx context.Context, o domain.ShareOrigin, a domain.TopicAttachment) error {
+	if p.Inbox == nil || p.Async == nil {
+		return p.send(ctx, o, "Attachments unavailable.")
+	}
+	if a.GroupID == "" {
+		if !p.download(o, []domain.TopicAttachment{a}, a.Caption) {
+			return p.send(ctx, o, "Private transfers are busy. Retry shortly.")
+		}
+		return nil
+	}
+	if p.albums == nil {
+		p.albums = map[string]*privateAlbum{}
+	}
+	key := o.GrantID + ":" + strconv.FormatUint(o.Revision, 10) + ":" + strconv.FormatInt(o.ActorID, 10) + ":" + a.GroupID
+	album := p.albums[key]
+	if album == nil {
+		if len(p.albums) >= 64 {
+			return p.send(ctx, o, "Too many pending albums. Retry shortly.")
+		}
+		album = &privateAlbum{origin: o}
+		p.albums[key] = album
+	}
+	if len(album.attachments) >= 10 {
+		return p.send(ctx, o, "Album limit is 10 files.")
+	}
+	album.attachments = append(album.attachments, a)
+	if a.Caption != "" {
+		album.caption = a.Caption
+	}
+	album.due = p.Now().Add(time.Second)
+	return nil
+}
+
+type privateFollowup struct {
+	origin  domain.ShareOrigin
+	due     time.Time
+	dismiss bool
+}
+
+func (p *PrivateControl) Tick(ctx context.Context) error {
+	if p.Dashboard != nil && p.Dashboard.Reconciler != nil {
+		_ = p.Dashboard.Reconciler.Flush(ctx)
+	}
+	st, _ := p.Sharing.Snapshot()
+	if p.denialNotices == nil {
+		p.denialNotices = map[string]uint64{}
+	}
+	notices := 0
+	for id, g := range st.Grants {
+		if notices >= 2 {
+			break
+		}
+		if g.State != domain.GrantRevoked && g.State != domain.GrantExpired && g.State != domain.GrantSuspended {
+			continue
+		}
+		if p.denialNotices[id] == g.Revision {
+			continue
+		}
+		notices++
+		p.denialNotices[id] = g.Revision
+		for ref, b := range p.callbacks {
+			if b.origin.GrantID == id {
+				delete(p.callbacks, ref)
+			}
+		}
+		m := st.Mirrors[id]
+		if m.Address.ThreadID == 0 {
+			continue
+		}
+		guard := p.Sharing.BindingGuard(id, g.Revision)
+		if m.KeyboardMessageID > 0 {
+			_ = p.Telegram.EditButtonsAt(ctx, domain.MessageAddress{ChatID: m.Address.ChatID, MessageID: m.KeyboardMessageID}, nil, guard)
+		}
+		_, _ = p.Telegram.SendAt(ctx, m.Address, domain.Outgoing{Text: "Shared access is " + string(g.State) + ". Existing history is retained.", MaxParts: 1}, guard)
+	}
+	for key, o := range p.typing {
+		_, release, decision := p.Sharing.Begin(ctx, o, domain.ShareDialog)
+		if !decision.Allowed {
+			delete(p.typing, key)
+		} else {
+			release()
+		}
+	}
+	if p.Output != nil {
+		_ = p.Output.Tick(ctx)
+	}
+	if p.Dashboard != nil {
+		st, _ := p.Sharing.Snapshot()
+		recipients := map[int64]bool{}
+		for id := range st.Dashboards {
+			recipients[id] = true
+		}
+		for _, g := range st.Grants {
+			if g.State == domain.GrantActive {
+				recipients[g.RecipientID] = true
+			}
+		}
+		ids := make([]int64, 0, len(recipients))
+		for id := range recipients {
+			ids = append(ids, id)
+		}
+		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+		start := sort.Search(len(ids), func(i int) bool { return ids[i] > p.dashboardAfter })
+		if start == len(ids) {
+			start = 0
+		}
+		for n := 0; n < min(len(ids), 2); n++ {
+			id := ids[(start+n)%len(ids)]
+			p.dashboardAfter = id
+			if p.Output != nil && p.Output.Automatic != nil && !p.Output.Automatic() {
+				active := false
+				for _, g := range st.Grants {
+					if g.RecipientID == id && g.State == domain.GrantActive {
+						active = true
+						break
+					}
+				}
+				if active {
+					continue
+				}
+			}
+			_ = p.Dashboard.Refresh(ctx, id, false)
+		}
+	}
+	pending := p.followups[:0]
+	for _, f := range p.followups {
+		if p.Now().Before(f.due) {
+			pending = append(pending, f)
+			continue
+		}
+		_ = p.screen(ctx, f.origin, domain.MaxScreenLines)
+		if f.dismiss {
+			_ = p.keys(ctx, f.origin, []string{domain.KeyEscape})
+		}
+	}
+	p.followups = pending
+	for key, a := range p.albums {
+		if !p.Now().Before(a.due) {
+			delete(p.albums, key)
+			if !p.download(a.origin, a.attachments, a.caption) {
+				_ = p.send(ctx, a.origin, "Private transfers are busy. Please resend the album.")
+			}
+		}
+	}
+	return nil
+}
+
+func (p *PrivateControl) download(o domain.ShareOrigin, files []domain.TopicAttachment, caption string) bool {
+	return p.Async(func(ctx context.Context) func(context.Context) error {
+		callCtx, done, d := p.Sharing.Begin(ctx, o, domain.ShareAttachment)
+		if !d.Allowed {
+			return nil
+		}
+		defer done()
+		var paths []string
+		var total int
+		for _, a := range files {
+			data, err := p.Transport.Download(callCtx, a.FileID, 20<<20)
+			if err != nil {
+				return func(ctx context.Context) error { return p.send(ctx, o, "Attachment download failed.") }
+			}
+			total += len(data)
+			if total > 40<<20 {
+				return func(ctx context.Context) error { return p.send(ctx, o, "Album exceeds 40 MiB.") }
+			}
+			if callCtx.Err() != nil {
+				return nil
+			}
+			name := domain.SafeFileName(a.Name, domain.DefaultAttachmentName(a.Kind, a.MIME))
+			path, err := p.Inbox.Save(callCtx, fmt.Sprintf("%d-%s-%s", o.ActorID, rand.Text(), name), data)
+			if err != nil {
+				return func(ctx context.Context) error { return p.send(ctx, o, "Attachment save failed.") }
+			}
+			paths = append(paths, path)
+		}
+		return func(ctx context.Context) error {
+			return p.effect(ctx, o, domain.ShareAttachment, func(ctx context.Context) error {
+				return p.Herdr.Prompt(ctx, o.Key.PaneID, domain.AttachmentPrompt(caption, paths))
+			})
+		}
+	})
+}
+
+func (p *PrivateControl) Invalidate(ctx context.Context, key domain.Key) error {
+	_ = p.InvalidatePrivate(ctx, key)
+	if p.InvalidateOwner != nil {
+		return p.InvalidateOwner(ctx, key)
+	}
+	return nil
+}

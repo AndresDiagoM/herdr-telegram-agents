@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"time"
 
@@ -85,7 +84,7 @@ func BuildDoctor(env PluginEnv, version string, log *slog.Logger) *Doctor {
 		Options:       state.NewOptionsStore(env.ConfigDir, log),
 		Mapping:       mappings,
 		Broken:        mappings.BrokenFiles,
-		Pid:           state.NewPidFile(env.StateDir, proc.Alive, log),
+		Pid:           state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime),
 		Alive:         proc.Alive,
 		ControlStatus: proc.Status,
 		Inspector: func(cfg domain.Config) (domain.TelegramInspector, error) {
@@ -196,14 +195,35 @@ func PaneOpener(env PluginEnv, log *slog.Logger) domain.PaneOpener {
 // NewPidFile returns the daemon pid file with process liveness checks.
 func NewPidFile(env PluginEnv, log *slog.Logger) domain.PidFile {
 	proc := system.NewProcess(env.StateDir, log)
-	return state.NewPidFile(env.StateDir, proc.Alive, log)
+	return state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime)
 }
 
 // BuildSupervisor wires pid file and process control for the actions.
 func BuildSupervisor(env PluginEnv, log *slog.Logger) *Supervisor {
 	proc := system.NewProcess(env.StateDir, log)
-	pid := state.NewPidFile(env.StateDir, proc.Alive, log)
+	pid := state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime)
 	return app.NewSupervisor(pid, proc, realClock{}, log)
+}
+
+// cleanUpdateArtifacts removes staged update workers and backups left by
+// earlier updates. The current job keeps its own until it succeeded, and
+// nothing is touched while an update worker holds the lock (the daemon may
+// be the replacement that worker is health-checking).
+func cleanUpdateArtifacts(env PluginEnv, job domain.UpdateJob, jobErr error, log *slog.Logger) {
+	proc := system.NewProcess(env.StateDir, log)
+	if system.NewUpdateLock(env.StateDir, proc.Alive, log).Active() {
+		return
+	}
+	if jobErr != nil && !os.IsNotExist(jobErr) {
+		return // unknown job: keep everything
+	}
+	keep := ""
+	if jobErr == nil && job.Phase != "succeeded" {
+		keep = job.ID
+	}
+	if n := system.CleanUpdateArtifacts(env.StateDir, keep, log); n > 0 {
+		log.Info("update artifacts cleaned", slog.Int("removed", n), slog.String("kept_job", keep))
+	}
 }
 
 // BuildUpdateManager wires the read-only check and approval flow used by
@@ -212,7 +232,7 @@ func BuildUpdateManager(env PluginEnv, log *slog.Logger) *app.UpdateManager {
 	proc := system.NewProcess(env.StateDir, log)
 	reader := &herdr.InstallationReader{Bin: env.BinPath, ExpectedRoot: env.Root, Status: proc.Status, Log: log}
 	preflight := &app.UpdatePreflight{Installation: reader, Checkout: &system.CheckoutInspector{Log: log}, ExpectedRoot: env.Root, History: state.NewUpdateStore(env.StateDir, log), Log: log}
-	return &app.UpdateManager{Releases: github.NewSource(&http.Client{Timeout: 10 * time.Second}, log), Preflight: preflight,
+	return &app.UpdateManager{Releases: github.NewSource(github.NewHTTPClient(), log), Preflight: preflight,
 		Herdr: herdr.NewGateway(env.SocketPath, log, herdr.DefaultBackoff), Log: log}
 }
 
@@ -320,9 +340,12 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 
 	clock := realClock{}
 	registry := app.NewRegistry(hg, clock, log)
-	reconciler := app.NewReconciler(tg, hg, mappings, mapping, opts, clock, log)
+	// Topic names come from agent labels: they leave through the same
+	// redaction as posts.
+	reconciler := app.NewReconciler(app.NewRedactingGateway(tg, cfg.BotToken, opts.RedactEnabled, log), hg, mappings, mapping, opts, clock, log)
 	capture := app.NewCapture(hg, registry.Live, clock, log)
 	inbox := state.NewInbox(env.StateDir, log)
+	inbox.MaxTotal = opts.InboxMaxTotalBytes
 	bridge := app.NewBridge(cfg, hg, tg, registry, reconciler, capture, opts,
 		app.Services{Replies: domain.MultiReplySource{
 			transcript.NewReader(log),
@@ -332,13 +355,53 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 			Updates: BuildUpdateManager(env, log), UpdateJobs: state.NewUpdateStore(env.StateDir, log),
 			LaunchUpdate:  func(ctx context.Context, id string) (int, error) { return LaunchUpdateWorker(ctx, env, id, log) },
 			UpdateRunning: func() bool { return BuildSupervisor(env, log).Status().Running }}, clock, log)
-	if job, err := state.NewUpdateStore(env.StateDir, log).Load(ctx); err == nil {
+	job, jobErr := state.NewUpdateStore(env.StateDir, log).Load(ctx)
+	if jobErr == nil {
 		bridge.RestoreUpdate(job)
-	} else if !os.IsNotExist(err) {
-		log.Warn("update state unreadable", slog.String("err", err.Error()))
+	} else if !os.IsNotExist(jobErr) {
+		log.Warn("update state unreadable", slog.String("err", jobErr.Error()))
 	}
+	cleanUpdateArtifacts(env, job, jobErr, log)
 	presence := app.NewPresence(system.NewIdleSource(log), opts, clock, log)
 	d = app.NewDaemon(cfg, hg, tg, registry, reconciler, bridge, capture, state.NewConfigStore(env.ConfigDir, log), opts, presence, clock, log)
 	d.SetInbox(inbox)
+	d.Sharing = app.NewSharing(ctx, state.NewSharingStore(env.StateDir, log), log)
+	d.Sharing.BotID = tg.ConnectedBotID()
+	d.Sharing.Agent = registry.Agent
+	d.Sharing.Now = clock.Now
+	privateTelegram := app.PrivateRedactor{DestinationTelegram: tg, Redactor: domain.NewRedactor(cfg.BotToken), Log: log, Unavailable: func(ctx context.Context, chat int64) {
+		// A private chat id is the recipient's user id.
+		_ = d.Sharing.Reachability(ctx, chat, true, clock.Now())
+	}}
+	bridge.PrivateBusy = tg.PrivateBusy
+	bridge.Shares = &app.SharePanel{Sharing: d.Sharing, Capability: &app.PrivateCapability{Source: tg, Log: log}, Telegram: app.NewRedactingGateway(tg, cfg.BotToken, opts.RedactEnabled, log), Private: privateTelegram, Config: cfg, Agent: registry.Agent, KeyForThread: reconciler.KeyForThread, Now: clock.Now}
+	privateReconciler := &app.PrivateReconciler{Automatic: opts.SyncEnabled, Sharing: d.Sharing, Telegram: privateTelegram, Agent: registry.Agent, Now: clock.Now, Log: log}
+	bridge.Shares.OnGrant = privateReconciler.Grant
+	bridge.PrivateReconciler = privateReconciler
+	bridge.SetPrivateControl(&app.PrivateControl{Sharing: d.Sharing, Telegram: privateTelegram, Transport: tg, Herdr: hg, Git: system.NewGitRunner(log), Inbox: inbox, Agent: registry.Agent, Now: clock.Now})
+
+	privateOutput := &app.PrivateOutput{Control: bridge.PrivateControl, Capture: capture, ExactReplies: transcript.NewOpenCodeReader(hg.AgentSession, system.NewOpenCodeExporter(log).Export, log), Automatic: opts.SyncEnabled}
+	bridge.PrivateControl.Output = privateOutput
+	bridge.PrivateControl.Read = privateOutput.Read
+	privateDashboard := app.NewPrivateDashboard(bridge.PrivateControl, privateReconciler, cfg.BotUsername, tg)
+	bridge.PrivateControl.Dashboard = privateDashboard
+	bridge.PrivateControl.Overview = privateDashboard.Handle
+	bridge.Shares.OnGrant = func(ctx context.Context, g domain.ShareGrant) error {
+		if err := privateReconciler.Grant(ctx, g); err != nil {
+			return err
+		}
+		return privateDashboard.Refresh(ctx, g.RecipientID, true)
+	}
+	tg.SetPrivateTrust(d.Sharing.Grantee)
+	tg.SetPrivateRegistration(func(ctx context.Context, c domain.PrivateContact) (bool, error) {
+		if _, enabled := d.Sharing.Snapshot(); !enabled {
+			return false, nil
+		}
+		first, err := d.Sharing.Register(ctx, c.ActorID, c.ChatID, c.Name, c.Username, c.At)
+		if err == nil {
+			d.Sharing.ObserveUpdate(c.UpdateID)
+		}
+		return first, err
+	})
 	return d, run, closeAll, nil
 }

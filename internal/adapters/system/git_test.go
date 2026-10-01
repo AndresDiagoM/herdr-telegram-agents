@@ -132,3 +132,38 @@ func TestGitRunnerTimeout(t *testing.T) {
 		t.Fatalf("timeout did not stop the process: %v", time.Since(start))
 	}
 }
+
+// TestGitRunnerIgnoresRepositoryCommands: the repository's own config can
+// name programs (fsmonitor hook, external diff, textconv driver). /git runs
+// in whatever directory the agent works in, so none of them may execute.
+func TestGitRunnerIgnoresRepositoryCommands(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts")
+	}
+	dir := gitRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"$0 $*\" >> "+marker+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("*.txt diff=evil\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range [][2]string{{"core.fsmonitor", script}, {"diff.external", script}, {"diff.evil.textconv", script}} {
+		cmd := exec.Command("git", "config", kv[0], kv[1])
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git config %v: %v\n%s", kv, err, out)
+		}
+	}
+	r := NewGitRunner(nil)
+	ctx := context.Background()
+	for _, args := range [][]string{{"status", "--short", "--branch"}, {"diff", "HEAD"}, {"diff", "--cached"}, {"log", "--oneline", "--decorate", "-n", "10"}} {
+		if _, err := r.Run(ctx, dir, args); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if data, err := os.ReadFile(marker); err == nil {
+		t.Fatalf("repository command ran:\n%s", data)
+	}
+}

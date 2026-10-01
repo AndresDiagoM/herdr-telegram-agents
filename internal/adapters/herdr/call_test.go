@@ -196,3 +196,21 @@ func TestCallLargeReply(t *testing.T) {
 		t.Fatalf("text len = %d, want %d", len(res.Read.Text), len(big))
 	}
 }
+
+// TestCallRejectsOversizedReply: a reply line is read up to the same cap as
+// the event stream; a larger one is an error, not unbounded memory.
+func TestCallRejectsOversizedReply(t *testing.T) {
+	old := maxReplyLine
+	maxReplyLine = 1 << 20
+	defer func() { maxReplyLine = old }()
+	s := testkit.NewNDJSONServer(t, nil)
+	big := strings.Repeat("x", 2<<20)
+	s.Handle("agent.read", func(id string, params json.RawMessage) (any, *testkit.APIError) {
+		return map[string]any{"type": "pane_read", "read": map[string]any{"text": big}}, nil
+	})
+	var res paneReadResult
+	err := call(context.Background(), dial, s.Path(), testLogger(t), "agent.read", nil, &res)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized reply: err = %v, text len %d", err, len(res.Read.Text))
+	}
+}

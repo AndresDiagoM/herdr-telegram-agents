@@ -26,6 +26,7 @@ type FakeProcess struct {
 	spawnFails  error
 	held        int
 	heldSince   time.Time
+	unverified  bool
 	now         func() time.Time
 
 	// SpawnAcquires makes Spawn take the pid file for the new process.
@@ -50,6 +51,13 @@ func (p *FakeProcess) SetUnsupported(v bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.unsupported = v
+}
+
+// SetUnverified makes Read report a pid whose start time is unknown.
+func (p *FakeProcess) SetUnverified(v bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.unverified = v
 }
 
 // SetControlUnavailable makes Stop, Resync and Status behave like a daemon
@@ -214,7 +222,7 @@ func (p *FakeProcess) Read() (domain.PidInfo, error) {
 	if p.held == 0 {
 		return domain.PidInfo{}, domain.ErrNotRunning
 	}
-	return domain.PidInfo{PID: p.held, Since: p.heldSince}, nil
+	return domain.PidInfo{PID: p.held, Since: p.heldSince, Verified: !p.unverified}, nil
 }
 
 func (p *FakeProcess) Release() error {

@@ -165,6 +165,7 @@ func TestOptionGroupsAndSpecs(t *testing.T) {
 	}{
 		{OptionInboxEnabled, KindBool, "true", ""},
 		{OptionInboxMaxMB, KindChoice, "20", ChoiceSourceMegabytes},
+		{OptionInboxMaxTotalMB, KindChoice, "500", ChoiceSourceQuota},
 		{OptionInboxDeleteAfterDays, KindChoice, "7", ChoiceSourceDays},
 	}
 	if len(inbox) != len(wantInbox) {
@@ -176,7 +177,7 @@ func TestOptionGroupsAndSpecs(t *testing.T) {
 			t.Errorf("inbox option %d = %+v, want %+v", i, got, w)
 		}
 	}
-	if inbox[1].Validate == nil || inbox[2].Validate == nil {
+	if inbox[1].Validate == nil || inbox[2].Validate == nil || inbox[3].Validate == nil {
 		t.Error("inbox choice options must carry validators")
 	}
 	quiet := OptionsInGroup(GroupQuiet)
