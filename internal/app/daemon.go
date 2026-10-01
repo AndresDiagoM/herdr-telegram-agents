@@ -736,8 +736,17 @@ func (d *Daemon) handleErr(ctx context.Context, err error) error {
 	if errors.As(err, &migrated) {
 		d.log.Warn("chat migrated, updating config; restart the daemon to use the new id",
 			slog.Int64("old", d.cfg.ChatID), slog.Int64("new", migrated.NewChatID))
+		// /observers saves the config from the bridge while the daemon
+		// runs, so d.cfg may be stale: start from the saved config.
+		next := d.cfg
+		if saved, err := d.configs.Load(ctx); err == nil {
+			next = saved
+		} else {
+			d.log.Warn("[FIX] config unreadable on chat migration, saving the startup copy", slog.String("err", err.Error()))
+		}
+		next.ChatID = migrated.NewChatID
 		d.cfg.ChatID = migrated.NewChatID
-		if err := d.configs.Save(ctx, d.cfg); err != nil {
+		if err := d.configs.Save(ctx, next); err != nil {
 			d.log.Error("save migrated config failed", slog.String("err", err.Error()))
 		}
 		d.notify(ctx, "the Telegram group id changed; restart Telegram Agents to continue")

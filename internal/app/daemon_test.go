@@ -476,6 +476,27 @@ func TestDaemonChatMigration(t *testing.T) {
 	}
 }
 
+// TestDaemonChatMigrationKeepsLiveConfig: /observers saves the config while
+// the daemon runs. A later chat migration must save the new chat id on top
+// of that config, not on the copy the daemon started with.
+func TestDaemonChatMigrationKeepsLiveConfig(t *testing.T) {
+	f := newDaemon(t)
+	f.herdr.SetAgents([]domain.Agent{agent("p1", "t1", "a", domain.StatusWorking)})
+	live, _ := f.configs.Load(context.Background())
+	live.ObserverIDs = []int64{4242}
+	f.configs.Set(live)
+	f.tg.FailNext("create", &domain.ChatMigratedError{NewChatID: -777})
+	f.start(t)
+	waitFor(t, "config rewrite", func() bool { return f.configs.SaveCount() == 1 })
+	cfg, _ := f.configs.Load(context.Background())
+	if cfg.ChatID != -777 || len(cfg.ObserverIDs) != 1 || cfg.ObserverIDs[0] != 4242 {
+		t.Fatalf("config after migration = chat %d observers %v", cfg.ChatID, cfg.ObserverIDs)
+	}
+	if err := f.stop(t); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
 func TestDaemonBlockedScreenIsPosted(t *testing.T) {
 	f := newDaemon(t)
 	f.herdr.SetAgents([]domain.Agent{agent("p1", "t1", "reviewer", domain.StatusWorking)})
