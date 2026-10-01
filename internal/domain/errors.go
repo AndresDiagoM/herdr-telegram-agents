@@ -28,6 +28,10 @@ var (
 	// or a private chat is closed to it (the user never pressed Start or
 	// blocked the bot).
 	ErrForbidden = errors.New("bot is forbidden in chat")
+	// ErrRecipientUnavailable means one private recipient closed the chat
+	// to the bot (blocked it or never pressed Start). Unlike ErrForbidden it
+	// concerns a single contact and is never fatal for the daemon.
+	ErrRecipientUnavailable = errors.New("private recipient is unavailable")
 	// ErrMessageGone means the bot message to edit or delete no longer
 	// exists; the dashboard recreates its message on it.
 	ErrMessageGone = errors.New("message is gone")

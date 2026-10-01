@@ -28,7 +28,8 @@ func (r *runningBridge) reactionsOn(t *testing.T) {
 
 // newRunningBridge builds a Bridge over the fixture's fakes with a real
 // registry and reconciler, and runs it until the test ends.
-func newRunningBridge(t *testing.T) *runningBridge {
+// setup runs against the bridge before Run starts.
+func newRunningBridge(t *testing.T, setup ...func(*bridgeFixture, *Bridge)) *runningBridge {
 	t.Helper()
 	f := newBridgeFixture(t)
 	cfg := domain.Config{ChatID: -1001234567890, BotUsername: "agents_bot"}
@@ -42,6 +43,9 @@ func newRunningBridge(t *testing.T) *runningBridge {
 	b.in.agents = f.in.agents
 	b.in.live = f.in.live
 	b.out.topics, b.in.topics = f.view, f.view
+	for _, fn := range setup {
+		fn(f, b)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {

@@ -151,7 +151,7 @@ func (r *PrivateReconciler) flushEvent(ctx context.Context, e AgentEvent) error 
 				}
 				return r.Grant(ctx, next)
 			}
-			if errors.Is(err, domain.ErrForbidden) {
+			if errors.Is(err, domain.ErrForbidden) || errors.Is(err, domain.ErrRecipientUnavailable) {
 				_ = r.Sharing.Reachability(ctx, g.RecipientID, true, r.Now())
 			}
 			continue

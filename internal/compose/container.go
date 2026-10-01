@@ -343,7 +343,10 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 	d.Sharing.BotID = tg.ConnectedBotID()
 	d.Sharing.Agent = registry.Agent
 	d.Sharing.Now = clock.Now
-	privateTelegram := app.PrivateRedactor{DestinationTelegram: tg, Redactor: domain.NewRedactor(cfg.BotToken)}
+	privateTelegram := app.PrivateRedactor{DestinationTelegram: tg, Redactor: domain.NewRedactor(cfg.BotToken), Log: log, Unavailable: func(ctx context.Context, chat int64) {
+		// A private chat id is the recipient's user id.
+		_ = d.Sharing.Reachability(ctx, chat, true, clock.Now())
+	}}
 	bridge.PrivateBusy = tg.PrivateBusy
 	bridge.Shares = &app.SharePanel{Sharing: d.Sharing, Capability: &app.PrivateCapability{Source: tg, Log: log}, Telegram: tg, Private: privateTelegram, Config: cfg, Agent: registry.Agent, KeyForThread: reconciler.KeyForThread, Now: clock.Now}
 	privateReconciler := &app.PrivateReconciler{Automatic: opts.SyncEnabled, Sharing: d.Sharing, Telegram: privateTelegram, Agent: registry.Agent, Now: clock.Now, Log: log}
