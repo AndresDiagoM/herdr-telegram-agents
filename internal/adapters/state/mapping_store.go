@@ -159,7 +159,7 @@ func (s *MappingStore) Save(ctx context.Context, m *domain.Mapping) error {
 	if err != nil {
 		return fmt.Errorf("encode mapping: %w", err)
 	}
-	if err := writeAtomic(s.path, append(data, '\n'), 0o644); err != nil {
+	if err := writeAtomic(s.path, append(data, '\n'), 0o600); err != nil {
 		return fmt.Errorf("save mapping: %w", err)
 	}
 	if m.Version > 0 && m.Version < version {

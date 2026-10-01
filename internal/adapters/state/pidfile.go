@@ -72,7 +72,7 @@ func (p *PidFile) Path() string { return p.path }
 func (p *PidFile) Acquire(pid int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := os.MkdirAll(filepath.Dir(p.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.path), 0o700); err != nil {
 		return fmt.Errorf("mkdir for pid file: %w", err)
 	}
 	for attempt := 0; attempt < 2; attempt++ {
