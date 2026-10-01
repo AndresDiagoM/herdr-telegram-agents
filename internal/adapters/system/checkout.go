@@ -41,10 +41,10 @@ func (i *CheckoutInspector) InspectCheckout(ctx context.Context, root, tag strin
 	}
 	// Fetch only known refs. The tag's peeled commit must be on the remote
 	// mainline and at or ahead of the current HEAD.
-	if _, err := checkoutGit(ctx, root, "fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main", "refs/tags/"+tag); err != nil {
-		return result, err
-	}
-	if result.TargetCommit, err = checkoutGit(ctx, root, "rev-parse", "refs/tags/"+tag+"^{commit}"); err != nil {
+	if result.TargetCommit, err = fetchTag(ctx, root, tag); err != nil {
+		if i.Log != nil {
+			i.Log.Warn("[FIX] linked checkout tag fetch failed", slog.String("tag", tag), slog.String("err", err.Error()))
+		}
 		return result, err
 	}
 	if _, err := checkoutGit(ctx, root, "merge-base", "--is-ancestor", "HEAD", result.TargetCommit); err != nil {
@@ -58,6 +58,19 @@ func (i *CheckoutInspector) InspectCheckout(ctx context.Context, root, tag strin
 		i.Log.Info("linked checkout inspected", slog.String("branch", result.Branch), slog.Bool("fast_forward", true), slog.String("tag", tag))
 	}
 	return result, nil
+}
+
+// fetchTag fetches origin's main and the tag into the local tag and returns
+// the tag's commit. Without a destination the tag reached only FETCH_HEAD,
+// so a fresh clone could not resolve it and a stale local tag of the same
+// name was used instead. No "+": a local tag that disagrees with origin
+// makes the fetch fail rather than be trusted or overwritten.
+func fetchTag(ctx context.Context, root, tag string) (string, error) {
+	ref := "refs/tags/" + tag
+	if _, err := checkoutGit(ctx, root, "fetch", "--no-tags", "origin", "refs/heads/main:refs/remotes/origin/main", ref+":"+ref); err != nil {
+		return "", fmt.Errorf("fetch tag %s (a local tag that differs from origin is refused): %w", tag, err)
+	}
+	return checkoutGit(ctx, root, "rev-parse", "refs/tags/"+tag+"^{commit}")
 }
 
 func expectedOrigin(raw string) bool {
