@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/http"
 	"os"
 	"time"
 
@@ -212,7 +211,7 @@ func BuildUpdateManager(env PluginEnv, log *slog.Logger) *app.UpdateManager {
 	proc := system.NewProcess(env.StateDir, log)
 	reader := &herdr.InstallationReader{Bin: env.BinPath, ExpectedRoot: env.Root, Status: proc.Status, Log: log}
 	preflight := &app.UpdatePreflight{Installation: reader, Checkout: &system.CheckoutInspector{Log: log}, ExpectedRoot: env.Root, History: state.NewUpdateStore(env.StateDir, log), Log: log}
-	return &app.UpdateManager{Releases: github.NewSource(&http.Client{Timeout: 10 * time.Second}, log), Preflight: preflight,
+	return &app.UpdateManager{Releases: github.NewSource(github.NewHTTPClient(), log), Preflight: preflight,
 		Herdr: herdr.NewGateway(env.SocketPath, log, herdr.DefaultBackoff), Log: log}
 }
 
