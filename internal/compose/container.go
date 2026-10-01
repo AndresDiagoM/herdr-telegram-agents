@@ -205,6 +205,27 @@ func BuildSupervisor(env PluginEnv, log *slog.Logger) *Supervisor {
 	return app.NewSupervisor(pid, proc, realClock{}, log)
 }
 
+// cleanUpdateArtifacts removes staged update workers and backups left by
+// earlier updates. The current job keeps its own until it succeeded, and
+// nothing is touched while an update worker holds the lock (the daemon may
+// be the replacement that worker is health-checking).
+func cleanUpdateArtifacts(env PluginEnv, job domain.UpdateJob, jobErr error, log *slog.Logger) {
+	proc := system.NewProcess(env.StateDir, log)
+	if system.NewUpdateLock(env.StateDir, proc.Alive, log).Active() {
+		return
+	}
+	if jobErr != nil && !os.IsNotExist(jobErr) {
+		return // unknown job: keep everything
+	}
+	keep := ""
+	if jobErr == nil && job.Phase != "succeeded" {
+		keep = job.ID
+	}
+	if n := system.CleanUpdateArtifacts(env.StateDir, keep, log); n > 0 {
+		log.Info("update artifacts cleaned", slog.Int("removed", n), slog.String("kept_job", keep))
+	}
+}
+
 // BuildUpdateManager wires the read-only check and approval flow used by
 // the options panel. Every press uses fresh Herdr and Git observations.
 func BuildUpdateManager(env PluginEnv, log *slog.Logger) *app.UpdateManager {
@@ -333,11 +354,13 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 			Updates: BuildUpdateManager(env, log), UpdateJobs: state.NewUpdateStore(env.StateDir, log),
 			LaunchUpdate:  func(ctx context.Context, id string) (int, error) { return LaunchUpdateWorker(ctx, env, id, log) },
 			UpdateRunning: func() bool { return BuildSupervisor(env, log).Status().Running }}, clock, log)
-	if job, err := state.NewUpdateStore(env.StateDir, log).Load(ctx); err == nil {
+	job, jobErr := state.NewUpdateStore(env.StateDir, log).Load(ctx)
+	if jobErr == nil {
 		bridge.RestoreUpdate(job)
-	} else if !os.IsNotExist(err) {
-		log.Warn("update state unreadable", slog.String("err", err.Error()))
+	} else if !os.IsNotExist(jobErr) {
+		log.Warn("update state unreadable", slog.String("err", jobErr.Error()))
 	}
+	cleanUpdateArtifacts(env, job, jobErr, log)
 	presence := app.NewPresence(system.NewIdleSource(log), opts, clock, log)
 	d = app.NewDaemon(cfg, hg, tg, registry, reconciler, bridge, capture, state.NewConfigStore(env.ConfigDir, log), opts, presence, clock, log)
 	d.SetInbox(inbox)
