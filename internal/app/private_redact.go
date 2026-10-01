@@ -32,6 +32,12 @@ func (p PrivateRedactor) text(s string) string {
 	text, _ := r.Redact(s)
 	return text
 }
+func (p PrivateRedactor) markup(s string, html bool) string {
+	if !html {
+		return p.text(s)
+	}
+	return redactHTML(s, p.text)
+}
 func (p PrivateRedactor) buttons(in []domain.Button) []domain.Button {
 	out := append([]domain.Button(nil), in...)
 	for i := range out {
@@ -55,7 +61,7 @@ func (p PrivateRedactor) recipient(ctx context.Context, chat int64, op string, e
 }
 
 func (p PrivateRedactor) SendAt(ctx context.Context, a domain.TopicAddress, o domain.Outgoing, g domain.DispatchGuard) (int, error) {
-	o.Text = p.text(o.Text)
+	o.Text = p.markup(o.Text, o.HTML)
 	o.Footer = p.text(o.Footer)
 	o.Buttons = p.buttons(o.Buttons)
 	id, err := p.DestinationTelegram.SendAt(ctx, a, o, g)
@@ -68,7 +74,7 @@ func (p PrivateRedactor) DocumentAt(ctx context.Context, a domain.TopicAddress, 
 	return p.recipient(ctx, a.ChatID, "document", p.DestinationTelegram.DocumentAt(ctx, a, d, g))
 }
 func (p PrivateRedactor) EditTextAt(ctx context.Context, a domain.MessageAddress, text string, html bool, b []domain.Button, g domain.DispatchGuard) error {
-	return p.recipient(ctx, a.ChatID, "edit_text", p.DestinationTelegram.EditTextAt(ctx, a, p.text(text), html, p.buttons(b), g))
+	return p.recipient(ctx, a.ChatID, "edit_text", p.DestinationTelegram.EditTextAt(ctx, a, p.markup(text, html), html, p.buttons(b), g))
 }
 func (p PrivateRedactor) EditButtonsAt(ctx context.Context, a domain.MessageAddress, b []domain.Button, g domain.DispatchGuard) error {
 	return p.recipient(ctx, a.ChatID, "edit_buttons", p.DestinationTelegram.EditButtonsAt(ctx, a, p.buttons(b), g))

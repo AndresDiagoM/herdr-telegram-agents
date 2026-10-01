@@ -156,3 +156,61 @@ func TestOutboundRedactionOffPostsRaw(t *testing.T) {
 		t.Fatalf("Sent = %+v", sent)
 	}
 }
+
+// TestRedactingGatewayMasksTopicNamesAndToasts: an agent label, a topic
+// rename and a button toast are text that leaves the machine too.
+func TestRedactingGatewayMasksTopicNamesAndToasts(t *testing.T) {
+	fake := testkit.NewFakeTelegram(nil)
+	tg := newRedactingGateway(fake, domain.NewRedactor(testBotToken), nil, nil)
+	ctx := context.Background()
+	topic, err := tg.CreateTopic(ctx, "deploy "+testKey, domain.StatusIdle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fake.Topic(topic.ThreadID); strings.Contains(got.Name, testKey) || got.Name != "deploy sk-…uvwx" {
+		t.Fatalf("created topic name = %q", got.Name)
+	}
+	name := "work " + testKey
+	if err := tg.EditTopic(ctx, topic.ThreadID, domain.TopicPatch{Name: &name}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := fake.Topic(topic.ThreadID); strings.Contains(got.Name, testKey) {
+		t.Fatalf("edited topic name = %q", got.Name)
+	}
+	if name != "work "+testKey {
+		t.Fatal("caller's patch was rewritten in place")
+	}
+	if err := tg.AnswerButton(ctx, "cb", "copied "+testKey); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range fake.Calls() {
+		if strings.Contains(c, testKey) {
+			t.Fatalf("secret reached Telegram: %q", c)
+		}
+	}
+}
+
+// TestRedactingGatewayKeepsHTMLValid: masking runs on rendered HTML, so a
+// value pattern must never swallow a closing tag.
+func TestRedactingGatewayKeepsHTMLValid(t *testing.T) {
+	fake := testkit.NewFakeTelegram(nil)
+	tg := newRedactingGateway(fake, domain.NewRedactor(), nil, nil)
+	ctx := context.Background()
+	id, err := tg.Send(ctx, domain.Outgoing{Text: "<pre>token=abcdefgh</pre> and <b>x</b>", HTML: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.Sent()[0].Text; got != "<pre>token=[redacted]</pre> and <b>x</b>" {
+		t.Fatalf("Send HTML = %q", got)
+	}
+	if err := tg.EditText(ctx, id, `<code>password="hunter2secret"</code>`, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	p := PrivateRedactor{DestinationTelegram: fake}
+	if _, err := p.SendAt(ctx, domain.TopicAddress{ChatID: 5}, domain.Outgoing{Text: "<pre>token=abcdefgh</pre>", HTML: true}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.Destination(5).Sent()[0].Text; got != "<pre>token=[redacted]</pre>" {
+		t.Fatalf("private SendAt HTML = %q", got)
+	}
+}

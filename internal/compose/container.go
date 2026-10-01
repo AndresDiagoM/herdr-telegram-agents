@@ -319,7 +319,9 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 
 	clock := realClock{}
 	registry := app.NewRegistry(hg, clock, log)
-	reconciler := app.NewReconciler(tg, hg, mappings, mapping, opts, clock, log)
+	// Topic names come from agent labels: they leave through the same
+	// redaction as posts.
+	reconciler := app.NewReconciler(app.NewRedactingGateway(tg, cfg.BotToken, opts.RedactEnabled, log), hg, mappings, mapping, opts, clock, log)
 	capture := app.NewCapture(hg, registry.Live, clock, log)
 	inbox := state.NewInbox(env.StateDir, log)
 	bridge := app.NewBridge(cfg, hg, tg, registry, reconciler, capture, opts,
@@ -347,7 +349,7 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 		_ = d.Sharing.Reachability(ctx, chat, true, clock.Now())
 	}}
 	bridge.PrivateBusy = tg.PrivateBusy
-	bridge.Shares = &app.SharePanel{Sharing: d.Sharing, Capability: &app.PrivateCapability{Source: tg, Log: log}, Telegram: tg, Private: privateTelegram, Config: cfg, Agent: registry.Agent, KeyForThread: reconciler.KeyForThread, Now: clock.Now}
+	bridge.Shares = &app.SharePanel{Sharing: d.Sharing, Capability: &app.PrivateCapability{Source: tg, Log: log}, Telegram: app.NewRedactingGateway(tg, cfg.BotToken, opts.RedactEnabled, log), Private: privateTelegram, Config: cfg, Agent: registry.Agent, KeyForThread: reconciler.KeyForThread, Now: clock.Now}
 	privateReconciler := &app.PrivateReconciler{Automatic: opts.SyncEnabled, Sharing: d.Sharing, Telegram: privateTelegram, Agent: registry.Agent, Now: clock.Now, Log: log}
 	bridge.Shares.OnGrant = privateReconciler.Grant
 	bridge.PrivateReconciler = privateReconciler
