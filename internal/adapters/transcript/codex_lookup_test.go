@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,7 +25,8 @@ func (f *codexFixture) sessions() string { return filepath.Join(f.home, ".codex"
 // dayDirs are the shortcut's day directories for the test thread.
 func (f *codexFixture) dayDirs() []string {
 	var dirs []string
-	for _, d := range codexDayDirs(codexTestID, f.clock) {
+	days, _ := codexDayDirs(codexTestID, f.clock)
+	for _, d := range days {
 		dirs = append(dirs, filepath.Join(f.sessions(), d))
 	}
 	return dirs
@@ -323,4 +326,211 @@ func TestCodexDirectoriesAreReadInBatches(t *testing.T) {
 	if read := 100000 - s.left; read != codexReadBatch {
 		t.Fatalf("read %d entries before stopping, want one batch of %d", read, codexReadBatch)
 	}
+}
+
+// codexCreated is the test thread's creation time, from its UUIDv7.
+var codexCreated = time.UnixMilli(1790434781866)
+
+// writeReplacement puts a reverted thread's newer rollout, answering
+// CURRENT-ANSWER, in the UTC day directory days after the thread's creation,
+// and returns that directory.
+func (f *codexFixture) writeReplacement(days int) string {
+	f.t.Helper()
+	later := codexCreated.AddDate(0, 0, days).UTC()
+	dir := filepath.Join(f.sessions(), later.Format("2006"), later.Format("01"), later.Format("02"))
+	f.writeNamed(dir, "rollout-"+later.Format("2006-01-02T15-04-05")+"-"+codexTestID+"_"+codexRevertA+".jsonl",
+		append([]string{codexMeta(codexTestID)}, codexTurn("current", "m", "CURRENT-ANSWER", 1)...)...)
+	return dir
+}
+
+// TestSecurityRevertBeyondYearMustNotReturnRemovedAnswer covers a revert
+// later than the day directories reach: the search must still find the newer
+// rollout, or fall back, and never answer from the original file.
+func TestSecurityRevertBeyondYearMustNotReturnRemovedAnswer(t *testing.T) {
+	f := newCodexFixture(t)
+	f.clock = codexCreated.AddDate(0, 0, 400)
+	f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+	f.writeReplacement(399)
+	r, err := f.reader().LastReply(context.Background(), f.agent())
+	if r.Text == "REMOVED-ANSWER" || (err != nil && !errors.Is(err, domain.ErrNoReply)) {
+		t.Fatalf("incomplete search must not return a removed answer: reply=%q err=%v", r.Text, err)
+	}
+}
+
+// TestCodexDayLimitBoundary covers threads on both sides of codexLaterDays,
+// with and without a newer file on the thread's last listed day or later.
+func TestCodexDayLimitBoundary(t *testing.T) {
+	for _, age := range []int{codexLaterDays - 1, codexLaterDays, codexLaterDays + 1, codexLaterDays + 2, 3 * codexLaterDays} {
+		t.Run(fmt.Sprintf("%d days, original only", age), func(t *testing.T) {
+			f := newCodexFixture(t)
+			f.clock = codexCreated.AddDate(0, 0, age)
+			f.write(codexTestID, codexTurn("only", "m", "ONLY-ANSWER", 1)...)
+			r, err := f.reader().LastReply(context.Background(), f.agent())
+			if err != nil || r.Text != "ONLY-ANSWER" {
+				t.Fatalf("reply=%q err=%v; want the only rollout's answer", r.Text, err)
+			}
+		})
+		t.Run(fmt.Sprintf("%d days, replaced that day", age), func(t *testing.T) {
+			f := newCodexFixture(t)
+			f.clock = codexCreated.AddDate(0, 0, age)
+			f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+			f.writeReplacement(age)
+			r, err := f.reader().LastReply(context.Background(), f.agent())
+			if err != nil || r.Text != "CURRENT-ANSWER" {
+				t.Fatalf("reply=%q err=%v; want the replacement's answer", r.Text, err)
+			}
+		})
+	}
+}
+
+// TestCodexOldThreadWalkIsBounded covers a thread older than the day
+// directories reach: the walk that replaces them runs on the same budget,
+// and running out of it falls back instead of answering from the file found.
+func TestCodexOldThreadWalkIsBounded(t *testing.T) {
+	f := newCodexFixture(t)
+	f.clock = codexCreated.AddDate(0, 0, 400)
+	f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+	later := f.writeReplacement(399)
+	for i := 0; i < 8; i++ {
+		f.writeNamed(later, fmt.Sprintf("note-%d.txt", i), "x")
+	}
+	old := codexWalkLimit
+	codexWalkLimit = 10
+	defer func() { codexWalkLimit = old }()
+	f.wantNoReply("walk over budget")
+}
+
+// TestCodexMissingDayDirectoriesStillComplete covers the usual tree: most of
+// the listed days have no directory, which is no reason to fall back.
+func TestCodexMissingDayDirectoriesStillComplete(t *testing.T) {
+	f := newCodexFixture(t)
+	f.clock = codexCreated.AddDate(0, 0, 30)
+	f.write(codexTestID, codexTurn("only", "m", "ONLY-ANSWER", 1)...)
+	if err := os.MkdirAll(filepath.Join(f.sessions(), "2026", "10"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || r.Text != "ONLY-ANSWER" {
+		t.Fatalf("reply=%q err=%v; want the answer", r.Text, err)
+	}
+}
+
+func TestSecurityUnreadableNewerDayMustNotReturnRemovedAnswer(t *testing.T) {
+	f := newCodexFixture(t)
+	f.clock = codexCreated.AddDate(0, 0, 4)
+	f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+	dir := f.writeReplacement(3)
+	if err := os.Chmod(dir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if entries, err := os.ReadDir(dir); err == nil {
+		t.Skipf("directory permissions not enforced: %d entries", len(entries))
+	}
+	r, err := f.reader().LastReply(context.Background(), f.agent())
+	if !errors.Is(err, domain.ErrNoReply) || r.Text != "" {
+		t.Fatalf("unreadable newer directory must cause fallback: reply=%q err=%v", r.Text, err)
+	}
+	noLeak(t, "error", err.Error())
+}
+
+// failingDir lists its directory's entries, then fails instead of ending.
+type failingDir struct {
+	codexDir
+	done bool
+	err  error
+}
+
+func (d *failingDir) ReadDir(n int) ([]fs.DirEntry, error) {
+	if d.done {
+		return nil, d.err
+	}
+	d.done = true
+	entries, err := d.codexDir.ReadDir(n)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return entries, err
+	}
+	return entries, nil
+}
+
+// TestCodexDirectoryFailuresMakeTheSearchIncomplete covers a directory that
+// cannot be opened or whose listing fails part way, after an older rollout
+// was already found: the search falls back rather than answer with it. Only
+// a directory that does not exist is an empty one.
+func TestCodexDirectoryFailuresMakeTheSearchIncomplete(t *testing.T) {
+	ioErr := errors.New("input/output error on " + codexTestID)
+	cases := map[string]func(d codexDir, err error) (codexDir, error){
+		"open denied":    func(codexDir, error) (codexDir, error) { return nil, fs.ErrPermission },
+		"open i/o error": func(codexDir, error) (codexDir, error) { return nil, ioErr },
+		"listing fails":  func(d codexDir, err error) (codexDir, error) { return &failingDir{codexDir: d, err: ioErr}, err },
+		"listing denied": func(d codexDir, err error) (codexDir, error) {
+			return &failingDir{codexDir: d, err: fs.ErrPermission}, err
+		},
+		"listing says absent": func(d codexDir, err error) (codexDir, error) {
+			return &failingDir{codexDir: d, err: fs.ErrNotExist}, err
+		},
+	}
+	for name, fail := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newCodexFixture(t)
+			f.clock = codexCreated.AddDate(0, 0, 4)
+			f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+			later, _ := filepath.Rel(f.sessions(), f.writeReplacement(3))
+			old := codexOpenDir
+			codexOpenDir = func(root *os.Root, dir string) (codexDir, error) {
+				d, err := old(root, dir)
+				if dir != later {
+					return d, err
+				}
+				return fail(d, err)
+			}
+			defer func() { codexOpenDir = old }()
+			f.wantNoReply(name)
+			if !strings.Contains(fmt.Sprint(f.reader().LastReply(context.Background(), f.agent())), "could not be read") {
+				t.Fatal("want the incomplete-search reason")
+			}
+		})
+	}
+	t.Run("absent directory", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.clock = codexCreated.AddDate(0, 0, 4)
+		f.write(codexTestID, codexTurn("only", "m", "ONLY-ANSWER", 1)...)
+		old := codexOpenDir
+		codexOpenDir = func(root *os.Root, dir string) (codexDir, error) {
+			if strings.HasSuffix(dir, "28") {
+				return nil, &fs.PathError{Op: "open", Path: dir, Err: fs.ErrNotExist}
+			}
+			return old(root, dir)
+		}
+		defer func() { codexOpenDir = old }()
+		r, err := f.reader().LastReply(context.Background(), f.agent())
+		if err != nil || r.Text != "ONLY-ANSWER" {
+			t.Fatalf("reply=%q err=%v; want the answer", r.Text, err)
+		}
+	})
+}
+
+// TestCodexLinksThatMayHideARolloutFallBack covers links the search cannot
+// look through without leaving the tree: one named like the thread's
+// rollout, and, in the walk, one where a directory could be. Each may hide
+// the newest rollout, so the older file found is not answered with.
+func TestCodexLinksThatMayHideARolloutFallBack(t *testing.T) {
+	t.Run("link named like the rollout", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+		target := f.writeIn(filepath.Join(f.home, "elsewhere"), codexTestID, codexTurn("t", "m", "OUTSIDE", 1)...)
+		codexLink(t, target, filepath.Join(f.rolloutDir(codexTestID), "rollout-2026-09-26T10-30-00-"+codexTestID+"_"+codexRevertA+".jsonl"))
+		f.wantNoReply("rollout-named link")
+	})
+	t.Run("linked directory in the walk", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.clock = codexCreated.AddDate(0, 0, 400)
+		f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+		outside := filepath.Join(f.home, "outside")
+		if err := os.MkdirAll(outside, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		codexLink(t, outside, filepath.Join(f.sessions(), "2027"))
+		f.wantNoReply("linked directory")
+	})
 }

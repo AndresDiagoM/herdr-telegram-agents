@@ -88,7 +88,7 @@ func newCodexFixture(t *testing.T) *codexFixture {
 
 // rolloutDir is the day directory Codex would use for id.
 func (f *codexFixture) rolloutDir(id string) string {
-	dirs := codexDayDirs(id, time.Time{})
+	dirs, _ := codexDayDirs(id, time.Time{})
 	if len(dirs) == 0 {
 		f.t.Fatalf("no day directory for %s", id)
 	}
@@ -564,10 +564,13 @@ func TestCodexReadFailureNamesNothing(t *testing.T) {
 }
 
 func TestCodexDayDirs(t *testing.T) {
-	if dirs := codexDayDirs("01a0de3a-aaaa-4aaa-8aaa-aaaaaaaaaaaa", time.Time{}); dirs != nil {
-		t.Fatalf("a version 4 uuid must not guess day directories: %v", dirs)
+	if dirs, complete := codexDayDirs("01a0de3a-aaaa-4aaa-8aaa-aaaaaaaaaaaa", time.Time{}); dirs != nil || complete {
+		t.Fatalf("a version 4 uuid must not guess day directories: %v, complete %v", dirs, complete)
 	}
-	dirs := codexDayDirs(codexTestID, time.Time{})
+	dirs, complete := codexDayDirs(codexTestID, time.Time{})
+	if !complete {
+		t.Fatal("the creation days must be a complete search before the thread is two days old")
+	}
 	if len(dirs) < 3 {
 		t.Fatalf("dirs = %v, want the creation day and its neighbours", dirs)
 	}
@@ -585,7 +588,10 @@ func TestCodexDayDirs(t *testing.T) {
 func TestCodexDayDirsRunToNow(t *testing.T) {
 	created := time.UnixMilli(1790434781866) // the test thread's creation
 	until := created.AddDate(0, 0, 5)
-	dirs := codexDayDirs(codexTestID, until)
+	dirs, complete := codexDayDirs(codexTestID, until)
+	if !complete {
+		t.Fatal("five days after creation must be a complete search")
+	}
 	seen := map[string]bool{}
 	for _, d := range dirs {
 		if seen[d] {
@@ -599,7 +605,11 @@ func TestCodexDayDirsRunToNow(t *testing.T) {
 			t.Errorf("day %s (creation %+d) missing from %v", want, shift, dirs)
 		}
 	}
-	if far := codexDayDirs(codexTestID, created.AddDate(5, 0, 0)); len(far) > 2*(codexLaterDays+3) {
+	far, complete := codexDayDirs(codexTestID, created.AddDate(5, 0, 0))
+	if len(far) > 2*(codexLaterDays+3) {
 		t.Fatalf("%d day directories, want at most a year's", len(far))
+	}
+	if complete {
+		t.Fatal("days that stop a year after creation must not be a complete search five years on")
 	}
 }

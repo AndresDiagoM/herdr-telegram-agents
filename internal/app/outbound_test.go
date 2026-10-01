@@ -613,27 +613,35 @@ func TestOutboundScreenFallsBackWhenNoReply(t *testing.T) {
 	}
 }
 
-// TestOutboundScreenCodexRolledBackAnswerIsNotSent covers a Codex thread
-// whose last answer was rolled back: the reader reports ErrNoReply, /screen
-// posts the current screen and the removed answer reaches no message.
-func TestOutboundScreenCodexRolledBackAnswerIsNotSent(t *testing.T) {
+// TestOutboundScreenCodexRemovedAnswerIsNotSent covers a Codex thread whose
+// last answer was rolled back, or whose newest rollout the reader could not
+// establish (a revert it could not find, a directory it could not read): the
+// reader reports ErrNoReply, /screen posts the current screen and the removed
+// answer reaches no message.
+func TestOutboundScreenCodexRemovedAnswerIsNotSent(t *testing.T) {
 	const removed = "REMOVED-ANSWER"
-	f := newBridgeFixture(t)
-	a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
-	a.Kind = "codex"
-	f.agents[a.Key] = a
-	f.herdr.SetScreen("p1", "current screen")
-	f.replies.Fail(a.Key, fmt.Errorf("%w: the last codex turn was rolled back", domain.ErrNoReply))
-	if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
-		t.Fatal(err)
-	}
-	sent := f.tg.Sent()
-	if len(sent) != 1 || sent[0].Text != "current screen" || !sent[0].Code {
-		t.Fatalf("Sent = %+v, want the current screen", sent)
-	}
-	for _, m := range sent {
-		if strings.Contains(m.Text, removed) {
-			t.Fatalf("message %q carries the rolled-back answer", m.Text)
+	for _, reason := range []string{
+		"the last codex turn was rolled back",
+		"a session directory could not be read",
+		"too many session files to search",
+	} {
+		f := newBridgeFixture(t)
+		a := f.add(t, "p1", "t1", "a", domain.StatusIdle)
+		a.Kind = "codex"
+		f.agents[a.Key] = a
+		f.herdr.SetScreen("p1", "current screen")
+		f.replies.Fail(a.Key, fmt.Errorf("%w: %s", domain.ErrNoReply, reason))
+		if err := f.out.Screen(f.ctx, a.Key, 0); err != nil {
+			t.Fatal(err)
+		}
+		sent := f.tg.Sent()
+		if len(sent) != 1 || sent[0].Text != "current screen" || !sent[0].Code {
+			t.Fatalf("%s: Sent = %+v, want the current screen", reason, sent)
+		}
+		for _, m := range sent {
+			if strings.Contains(m.Text, removed) {
+				t.Fatalf("%s: message %q carries the removed answer", reason, m.Text)
+			}
 		}
 	}
 }

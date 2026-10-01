@@ -251,9 +251,13 @@ option of the Posts group:
   reads directories in batches and stops after 50,000 entries, the day
   directories included. A thread that Codex reverted continues in a new file,
   `rollout-<time>-<thread id>_<rollout id>.jsonl`, in the day directory of the
-  revert; the reader looks at every day from the thread's creation to now (up
-  to a year) and takes the newest of the thread's files, and when the search
-  cannot finish it posts the screen rather than an older file's answer. It
+  revert; the reader looks at every day from the thread's creation to now and
+  takes the newest of the thread's files. For a thread older than a year it
+  walks the whole sessions tree instead, within the same 50,000 entries. When
+  the search cannot establish the newest file (the budget runs out, a
+  directory cannot be opened or listed, or a link stands where the thread's
+  rollout or, in the walk, a directory could be), it posts the screen rather
+  than an older file's answer; only a missing day directory counts as empty. It
   reads the file from the end, within the
   same 4 MiB budget as Claude Code, and posts the last completed turn's final
   answer, which Codex records as the turn's `task_complete` message: the
