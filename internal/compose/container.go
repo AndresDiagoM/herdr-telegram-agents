@@ -366,6 +366,7 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 		}
 		return privateDashboard.Refresh(ctx, g.RecipientID, true)
 	}
+	tg.SetPrivateTrust(d.Sharing.Grantee)
 	tg.SetPrivateRegistration(func(ctx context.Context, c domain.PrivateContact) (bool, error) {
 		if _, enabled := d.Sharing.Snapshot(); !enabled {
 			return false, nil

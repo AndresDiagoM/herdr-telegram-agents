@@ -22,10 +22,13 @@ type PrivateDashboard struct {
 	menus       domain.PrivateCommandRegistrar
 	last        map[int64]string
 	refreshed   map[int64]time.Time
+	// menu is the command list last published per recipient; setMyCommands
+	// runs only when it changes.
+	menu map[int64]string
 }
 
 func NewPrivateDashboard(c *PrivateControl, r *PrivateReconciler, username string, menus domain.PrivateCommandRegistrar) *PrivateDashboard {
-	return &PrivateDashboard{Control: c, Reconciler: r, BotUsername: username, menus: menus, last: map[int64]string{}, refreshed: map[int64]time.Time{}}
+	return &PrivateDashboard{Control: c, Reconciler: r, BotUsername: username, menus: menus, last: map[int64]string{}, refreshed: map[int64]time.Time{}, menu: map[int64]string{}}
 }
 
 func (d *PrivateDashboard) Handle(ctx context.Context, e domain.PrivateMessage) error {
@@ -167,7 +170,11 @@ func (d *PrivateDashboard) Refresh(ctx context.Context, recipient int64, explici
 				}
 			}
 		}
-		_ = d.menus.RegisterPrivateCommands(ctx, recipient, commands)
+		if key := strings.Join(commands, " "); d.menu[recipient] != key {
+			if err := d.menus.RegisterPrivateCommands(ctx, recipient, commands); err == nil {
+				d.menu[recipient] = key
+			}
+		}
 	}
 	d.last[recipient] = text
 	d.refreshed[recipient] = c.Now()

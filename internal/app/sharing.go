@@ -55,6 +55,23 @@ func (s *Sharing) Snapshot() (domain.SharingState, bool) {
 	return s.state.Clone(), true
 }
 
+// Grantee reports whether the actor holds a grant the owner has not revoked
+// and that has not expired. The private ingress limiter gives such actors
+// the larger budget.
+func (s *Sharing) Grantee(actor int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.disabled {
+		return false
+	}
+	for _, g := range s.state.Grants {
+		if g.RecipientID == actor && g.State != domain.GrantRevoked && g.State != domain.GrantExpired {
+			return true
+		}
+	}
+	return false
+}
+
 // Register saves first contact before onboarding can be acknowledged. Later
 // metadata refreshes retain owner-hidden state and are coalesced by Flush.
 func (s *Sharing) Register(ctx context.Context, id, chatID int64, name, username string, now time.Time) (bool, error) {

@@ -57,3 +57,40 @@ func TestPrivateAliasDoesNotRenameOwner(t *testing.T) {
 		t.Fatal("private alias renamed owner agent")
 	}
 }
+
+type countingMenus struct{ calls int }
+
+func (m *countingMenus) RegisterPrivateCommands(context.Context, int64, []string) error {
+	m.calls++
+	return nil
+}
+
+// TestPrivateDashboardRegistersMenuOnce: every private message refreshes the
+// overview; the chat menu (setMyCommands) is published only when it changes.
+func TestPrivateDashboardRegistersMenuOnce(t *testing.T) {
+	f := newPrivateFixture(t, domain.ShareRead)
+	r := &app.PrivateReconciler{Sharing: f.s, Telegram: f.tg, Agent: f.s.Agent, Now: f.s.Now}
+	menus := &countingMenus{}
+	d := app.NewPrivateDashboard(f.p, r, "bot", menus)
+	for i := 0; i < 3; i++ {
+		if err := d.Refresh(context.Background(), 10, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if menus.calls != 1 {
+		t.Fatalf("setMyCommands calls = %d", menus.calls)
+	}
+}
+
+func TestSharingGrantee(t *testing.T) {
+	f := newPrivateFixture(t, domain.ShareRead)
+	if !f.s.Grantee(10) || f.s.Grantee(11) {
+		t.Fatal("grantee lookup wrong")
+	}
+	if err := f.s.ChangeState(context.Background(), f.g.ID, f.g.Revision, domain.GrantRevoked, f.now); err != nil {
+		t.Fatal(err)
+	}
+	if f.s.Grantee(10) {
+		t.Fatal("revoked grant still trusted")
+	}
+}

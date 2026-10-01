@@ -58,10 +58,21 @@ func (c *admissionClient) Do(req *http.Request) (*http.Response, error) {
 // first contact synchronously and return errors without private content.
 type PrivateRegistration func(context.Context, domain.PrivateContact) (bool, error)
 
+// Private ingress budgets per 10-second window. Contacts without an active
+// grant share their own small budget, so they cannot starve grantees.
+const (
+	privateWindow        = 10 * time.Second
+	privatePerActor      = 8
+	privateTrustedTotal  = 32
+	privateStrangerTotal = 8
+)
+
 type privateIngress struct {
 	window   time.Time
 	counts   map[int64]int
 	total    int
+	strange  int
+	trusted  func(int64) bool
 	busy     map[int64]bool
 	mu       sync.Mutex
 	register PrivateRegistration
@@ -75,6 +86,22 @@ func (g *Gateway) SetPrivateRegistration(register PrivateRegistration) {
 	g.private.mu.Lock()
 	defer g.private.mu.Unlock()
 	g.private.register = register
+}
+
+// SetPrivateTrust tells the limiter which actors hold an active grant. nil
+// (the default) treats every actor as trusted.
+func (g *Gateway) SetPrivateTrust(trusted func(int64) bool) {
+	g.private.mu.Lock()
+	defer g.private.mu.Unlock()
+	g.private.trusted = trusted
+}
+
+// trustedActor reports whether actor holds an active grant.
+func (g *Gateway) trustedActor(actor int64) bool {
+	g.private.mu.Lock()
+	trusted := g.private.trusted
+	g.private.mu.Unlock()
+	return trusted == nil || trusted(actor)
 }
 
 func privateContact(u *models.Update, now time.Time) (domain.PrivateContact, bool) {
@@ -188,6 +215,12 @@ func (g *Gateway) onPrivate(ctx context.Context, _ *bot.Bot, u *models.Update) {
 	ev.FirstContact = first
 	ev.Stale = ev.SentAt.Before(started)
 	if !g.admitPrivateEvent(ev.Contact.ActorID) || len(g.events) >= cap(g.events)/2 {
+		if !g.trustedActor(ev.Contact.ActorID) {
+			// No busy reply for strangers: a reply is work they could
+			// make the bot do at will.
+			g.log.Debug("[FIX] private stranger event dropped", "recipient_id", ev.Contact.ActorID)
+			return
+		}
 		g.privateBusy(ev.Contact.ActorID)
 		return
 	}
@@ -217,13 +250,27 @@ func (g *Gateway) admitPrivateEvent(actor int64) bool {
 	g.private.mu.Lock()
 	defer g.private.mu.Unlock()
 	now := g.queue.cfg.Now()
-	if g.private.counts == nil || now.Sub(g.private.window) >= 10*time.Second {
+	if g.private.counts == nil || now.Sub(g.private.window) >= privateWindow {
 		g.private.window = now
 		g.private.counts = map[int64]int{}
 		g.private.busy = map[int64]bool{}
 		g.private.total = 0
+		g.private.strange = 0
 	}
-	if g.private.total >= 32 || g.private.counts[actor] >= 8 {
+	if g.private.counts[actor] >= privatePerActor {
+		return false
+	}
+	// The trust lookup reads sharing state under its own lock; it never
+	// calls back into the gateway.
+	if g.private.trusted != nil && !g.private.trusted(actor) {
+		if g.private.strange >= privateStrangerTotal {
+			return false
+		}
+		g.private.counts[actor]++
+		g.private.strange++
+		return true
+	}
+	if g.private.total >= privateTrustedTotal {
 		return false
 	}
 	g.private.counts[actor]++

@@ -99,3 +99,29 @@ func TestPrivateIngressRateLimitReservesOtherRecipients(t *testing.T) {
 		t.Fatal("limiter did not recover")
 	}
 }
+
+// TestPrivateIngressStrangersCannotStarveGrantees: contacts without an
+// active grant share a small budget of their own, so a flood of strangers
+// never locks out a recipient the owner shared an agent with.
+func TestPrivateIngressStrangersCannotStarveGrantees(t *testing.T) {
+	now := time.Unix(100, 0)
+	g := &Gateway{queue: NewQueue(nil, QueueConfig{Now: func() time.Time { return now }})}
+	g.SetPrivateTrust(func(actor int64) bool { return actor == 99 })
+	for actor := int64(1); actor <= 4; actor++ {
+		for i := 0; i < 8; i++ {
+			g.admitPrivateEvent(actor)
+		}
+	}
+	if !g.admitPrivateEvent(99) {
+		t.Fatal("grantee refused after a stranger flood")
+	}
+	admitted := 0
+	for actor := int64(100); actor < 120; actor++ {
+		if g.admitPrivateEvent(actor) {
+			admitted++
+		}
+	}
+	if admitted != 0 {
+		t.Fatalf("stranger budget not shared: %d more admitted", admitted)
+	}
+}
