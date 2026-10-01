@@ -103,6 +103,8 @@ throwaway `debian:bookworm-slim` containers (amd64 and arm64) that clone the
 tag and run `scripts/install.sh`; macOS clones the tag into a temporary
 directory and runs the same script with a `PATH` that has no Go. Nothing
 outside the containers and that temporary directory is touched.
+`HERDR_TG_BASE_URL` must be `https://`; a local snapshot served over http
+also needs `HERDR_TG_ALLOW_INSECURE_BASE=1`, which the script passes through.
 
 - [x] `sh scripts/verify-install.sh <version> linux` prints `verify: linux/amd64 ok` and `verify: linux/arm64 ok` (2026-09-03, v0.1.0, v0.1.1, v0.2.0, v0.3.0, v0.4.0 and v0.5.0)
 - [x] `herdr plugin install permgps/herdr-telegram-agents -y` in a `debian:bookworm-slim` container with Herdr installed from `herdr.dev/install.sh` and no Go: the preview lists 7 actions, 2 panes and 2 build commands, `herdr plugin list` shows the plugin enabled, and the managed binary reports its version (2026-09-03, v0.2.0 with Herdr 0.8.2 on linux/arm64)

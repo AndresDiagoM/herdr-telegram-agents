@@ -400,7 +400,10 @@ semantic versions with the installed manifest and binary. It scans every
 release page within a fixed bound; a network error or incomplete scan is
 shown as a failure rather than as "up to date". No GitHub token is required.
 The check verifies the host binary and its exact entry in `checksums.txt`,
-the release manifest version, and its minimum Herdr version.
+the release manifest version, and its minimum Herdr version. A stable
+installation is offered stable releases only; an installed prerelease may
+move to a newer prerelease. Asset URLs must be `https` on `github.com`, and
+downloads follow redirects only to GitHub's own and asset storage hosts.
 
 If a newer release is eligible, the panel shows a separate **Update** button.
 That button expires after five minutes and is bound to the operator, group,
@@ -416,7 +419,11 @@ action is recognised from `update.json`, so it does not block a later update.
 A local link stays local: its `main` branch must be clean, have the expected
 GitHub origin, and be able to fast-forward to the release commit on the
 remote mainline. The worker saves the old binary, stops a running daemon,
-fast-forwards, and runs the release's checksum-verified install script.
+fast-forwards, and runs the release's checksum-verified install script. The
+install script gets the approved SHA-256 (`HERDR_TG_EXPECTED_SHA256`) and
+refuses a downloaded binary that differs from it before running it; the
+download overrides `HERDR_TG_BASE_URL` and `HERDR_TG_ALLOW_INSECURE_BASE`
+never reach it from the daemon's environment.
 Detached branches, local changes, another repository, and an incompatible
 Herdr version show the release and a reason without an Update button.
 
@@ -438,6 +445,10 @@ checkout, keep any new local changes, then restore the recorded old commit
 and the binary backup under `update-backups/<job-id>/`; run the install
 script from the desired release if a fresh binary is needed. Start or
 restart the daemon through the Herdr action after the files are sound.
+
+At daemon start, when no update worker runs, the staged worker copies
+(`update-worker-<job-id>`) and backups (`update-backups/<job-id>/`) of past
+updates are removed; the current job keeps its own until it succeeded.
 
 ## Silence the group
 
@@ -535,15 +546,23 @@ you can see the plugin working. Tick `Quiet while at the desk` in
 Every text that leaves the daemon for Telegram (blocked and done posts,
 `/screen` and `/screen all`, the `.txt` document, the follow-up of a
 forwarded Claude Code command, summary footers, document names, the labels
-of inline buttons, panel edits)
-passes one redaction step while `Redact secrets` is on:
+of inline buttons, panel edits, topic names, button toasts and the sharing
+panel) passes one redaction step while `Redact secrets` is on. HTML posts are
+redacted between tags only, so a masked value never swallows a closing tag:
 
 - API keys and tokens keep a recognisable prefix and their last four
   characters: `sk-…a1b2` (OpenAI and Anthropic), `ghp_…9f3e` and
   `github_pat_…`, `AKIA…Q7ZX` / `ASIA…`, `xoxb-…d8c1` (Slack), `glpat-…5tq2`
-  (GitLab), `AIza…w9Yc` (Google), `eyJ…7hJk` (JWT), `Bearer …k2m4`.
-- `password=`, `passwd=`, `pwd=`, `secret=`, `token=` and `api_key=` values
-  (also with `:`) become `password=[redacted]`; the key stays.
+  (GitLab), `AIza…w9Yc` (Google), `eyJ…7hJk` (JWT), `Bearer …k2m4`,
+  `Basic …ZA==` (HTTP Basic), `sk_live_…`/`rk_test_…` (Stripe).
+- Values of keys that contain `password`, `passwd`, `pwd`, `secret`,
+  `token`, `api_key`, `access_key`, `private_key` or `credential` (also
+  inside a longer name such as `DB_PASSWORD`, `AWS_SECRET_ACCESS_KEY`,
+  `client_secret` or `?access_token=`, with `=` or `:`, and JSON keys such
+  as `"password": "…"`) become `[redacted]`; the key stays. A query value
+  ends at `&`.
+- Credentials in a URL keep the scheme and user:
+  `postgres://app:[redacted]@db/app`.
 - The bot token itself, any string shaped like a Telegram bot token and
   `-----BEGIN … PRIVATE KEY-----` blocks (to the `END` line, or to the end of
   the screen when it is cut) become `[redacted]`.
@@ -551,7 +570,12 @@ passes one redaction step while `Redact secrets` is on:
 Every pattern has a minimum length, so ordinary words such as `token: none`
 or `password reset` are left alone. The log records how many replacements
 of which kind were made (`secrets redacted kinds="openai=1"`), never the
-value. Topic names, the daemon log and the Herdr side are not touched.
+value. The daemon log and the Herdr side are not touched.
+
+Error replies in the group never quote local absolute paths: a known failure
+answers a fixed text (`⚠️ not a git repository`), anything else keeps its
+first line with each absolute path cut to `…/<file name>`. The doctor action
+keeps the full details.
 
 ## Topic cleanup
 
@@ -718,10 +742,19 @@ calls use four separate bounded queues and a two-second call budget. Ambiguous
 private calls are not automatically replayed. A failed post may require another
 screen request. Durable first-contact registration happens before acknowledging
 Telegram updates; storage failures at this boundary can delay polling until
-storage recovers. Private event admission allows eight requests per recipient and
-32 overall per ten seconds, with a separate 32-slot bridge queue. Congestion
-notices are bounded and best effort; contact registration remains durable even
-when an agent request is rejected. Previously dropped or expired Telegram updates are unrecoverable.
+storage recovers. At most 30 new contacts are registered per minute; further
+first contacts are refused without a reply and their updates acknowledged.
+Private event admission allows eight requests per recipient and 32 overall per
+ten seconds for recipients with a grant; contacts without one share a separate
+budget of eight per ten seconds and get no congestion notice. A separate
+32-slot bridge queue follows. Congestion notices are bounded and best effort;
+contact registration remains durable even when an agent request is rejected.
+The chat menu is republished only when its command list changes. Previously
+dropped or expired Telegram updates are unrecoverable.
+
+A recipient who blocks the bot (Telegram answers 403 in the private chat) is
+marked unavailable and their sends fail on their own; the daemon keeps
+running. Only a 403 in the owner group stops it.
 
 ## See Also
 
