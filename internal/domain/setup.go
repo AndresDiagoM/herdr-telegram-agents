@@ -28,10 +28,15 @@ type GroupCandidate struct {
 	FromUsername string
 }
 
+// SetupStartPrefix starts the payload of the setup deep link; the one-time
+// code follows it.
+const SetupStartPrefix = "setup_"
+
 // SetupLink is the deep link the wizard shows: opening it and pressing
-// Start makes the bot offer the group picker.
-func SetupLink(botUsername string) string {
-	return "https://t.me/" + botUsername + "?start=setup"
+// Start sends "/start setup_<code>", which binds setup to that user and
+// makes the bot offer the group picker.
+func SetupLink(botUsername, code string) string {
+	return "https://t.me/" + botUsername + "?start=" + SetupStartPrefix + code
 }
 
 // SetupProbe is the slice of Telegram the setup wizard needs: prove the

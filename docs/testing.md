@@ -131,7 +131,7 @@ every 30 minutes, so a release becomes visible without any further step.
 Needs a real Herdr session with at least two agents and the configured
 Telegram group on a phone.
 
-- [x] **Setup wizard**: the setup action opens the popup, the token is accepted, the `t.me/<bot>?start=setup` link adds the bot to the group with **Manage topics**, **Delete messages** and **Pin messages**, and the daemon starts
+- [x] **Setup wizard**: the setup action opens the popup, the token is accepted, the `t.me/<bot>?start=setup_<code>` link adds the bot to the group with **Manage topics**, **Delete messages** and **Pin messages**, and the daemon starts
 - [x] **Topic per agent**: every live agent has a topic named `<workspace> · <agent>`; a new agent creates one within a few seconds
 - [x] **Status icons**: ⚡ working, ✅ idle, ❓ blocked, 🏆 done, 👀 unknown, 🏁 on exit; the icon follows the agent within one debounce window
 - [x] **Rename both ways**: renaming the tab in Herdr renames the topic; renaming the topic in Telegram renames the tab (or the custom agent name)

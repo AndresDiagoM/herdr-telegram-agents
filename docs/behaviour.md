@@ -468,7 +468,7 @@ the one thing that must ring come from somewhere else.
   post, and nothing typed into the private chat reaches an agent.
 - **Press Start once**: a bot may write to your private chat only after
   you opened it and pressed **Start**; setup does that through the
-  `t.me/<bot>?start=setup` link. The daemon checks each operator's chat at
+  `t.me/<bot>?start=setup_<code>` link. The daemon checks each operator's chat at
   start and when the option is switched on (log `pager reachable`); when no
   operator's chat takes messages it logs `pager unreachable: open the bot
   and press Start`, posts `⚠️ questions will ring in the topics …` into

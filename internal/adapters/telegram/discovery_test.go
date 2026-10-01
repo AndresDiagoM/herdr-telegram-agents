@@ -273,3 +273,48 @@ func TestProbeChatShared(t *testing.T) {
 		t.Fatalf("reply = %q", text)
 	}
 }
+
+// TestProbeBindsToSetupCode: while setup runs, anyone can find the bot and
+// message it. Only the user who opened the one-time link from the wizard
+// gets the group button and may choose the group; a promotion by an
+// anonymous admin (GroupAnonymousBot) or a bot is never a candidate.
+func TestProbeBindsToSetupCode(t *testing.T) {
+	p, api, _ := newProbe(t)
+	ctx, cancel := context.WithCancel(ctxT(t))
+	defer cancel()
+	if _, err := p.Identity(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ch, err := p.Candidates(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Bind("c0de")
+	api.on("getChat", func(url.Values) apiReply {
+		return okReply(map[string]any{"id": -100, "type": "supergroup", "title": "Agents", "is_forum": true})
+	})
+	api.on("getChatMember", func(url.Values) apiReply { return memberReply("administrator", true) })
+	alex := models.User{ID: 7, Username: "alex"}
+	mallory := models.User{ID: 66, Username: "mallory"}
+
+	p.Process(ctx, privateText(mallory, "/start setup"))
+	p.Process(ctx, privateText(mallory, "/start setup_wrong"))
+	if n := len(api.callsOf("sendMessage")); n != 0 {
+		t.Fatalf("stranger got %d replies", n)
+	}
+	p.Process(ctx, chatShared(mallory, 1, -100, "Agents"))
+	noCandidate(t, ch)
+
+	anonymous := models.User{ID: 1087968824, Username: "GroupAnonymousBot", IsBot: true}
+	p.Process(ctx, promotion(-100, "Agents", true, anonymous, true))
+	noCandidate(t, ch)
+
+	p.Process(ctx, privateText(alex, "/start setup_c0de"))
+	if text, _ := lastReply(t, api); !strings.Contains(text, "Manage topics") {
+		t.Fatalf("owner reply = %q", text)
+	}
+	p.Process(ctx, chatShared(alex, 1, -100, "Agents"))
+	if c := recvCandidate(t, ch); c.FromID != 7 {
+		t.Fatalf("candidate = %+v", c)
+	}
+}

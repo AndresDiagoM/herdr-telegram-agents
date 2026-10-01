@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -81,13 +83,21 @@ func (s *Setup) Run(ctx context.Context) (domain.Config, bool, error) {
 		defer c.Close()
 	}
 	s.ui.Print(fmt.Sprintf("Token accepted: @%s.", identity.Username))
-	link := domain.SetupLink(identity.Username)
+	code, err := setupCode()
+	if err != nil {
+		return domain.Config{}, false, err
+	}
+	if b, ok := probe.(interface{ Bind(string) }); ok {
+		b.Bind(code)
+	}
+	link := domain.SetupLink(identity.Username, code)
 	if err := s.ui.OpenLink(link); err != nil {
 		s.log.Debug("setup: could not open the link", slog.String("err", err.Error()))
 	}
 	s.ui.Print(fmt.Sprintf("Open %s in Telegram, press Start and tap \"Choose group\".", link))
 	s.ui.Print("Telegram adds the bot to the group you pick as an administrator with the \"Manage topics\" and \"Delete messages\" rights.")
-	s.ui.Print("Adding the bot to a forum group by hand with that right works too. Waiting...")
+	s.ui.Print("Only the Telegram account that opens this link can choose the group.")
+	s.ui.Print("Adding the bot to a forum group by hand with that right works too (as yourself, not as an anonymous admin). Waiting...")
 
 	candidate, err := s.pickCandidate(ctx, probe)
 	if err != nil {
@@ -207,6 +217,15 @@ func describeUser(c domain.GroupCandidate) string {
 		return fmt.Sprintf("@%s (id %d)", c.FromUsername, c.FromID)
 	}
 	return fmt.Sprintf("id %d", c.FromID)
+}
+
+// setupCode is the one-time code in the setup link: 8 random bytes, hex.
+func setupCode() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("setup code: %w", err)
+	}
+	return hex.EncodeToString(b[:]), nil
 }
 
 func closeProbe(p domain.SetupProbe) {
