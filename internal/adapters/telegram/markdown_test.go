@@ -22,10 +22,11 @@ func TestRenderMarkdown(t *testing.T) {
 		{"bold italic", "***both***", "<b><i>both</i></b>"},
 		{"italic never crosses a tag", "**x *y** z*", "<b>x *y</b> z*"},
 		{"nul bytes dropped", "a \x000\x00 b `c`", "a 0 b <code>c</code>"},
-		{"href quotes escaped", `[a](http://x"y)`, `<a href="http://x&quot;y">a</a>`},
+		{"href quotes escaped", `[a](http://x.y/"z)`, `<a href="http://x.y/&quot;z">a</a> (x.y)`},
+		{"bad host is text", `[a](http://x"y)`, `[a](http://x"y)`},
 		{"rule keeps its length", "---", mdRuleLine},
 		{"inline code keeps markup", "run `a <b> && **x**` now", "run <code>a &lt;b&gt; &amp;&amp; **x**</code> now"},
-		{"link", "see [docs](https://x.y/a?b=1&c=2)", `see <a href="https://x.y/a?b=1&amp;c=2">docs</a>`},
+		{"link", "see [docs](https://x.y/a?b=1&c=2)", `see <a href="https://x.y/a?b=1&amp;c=2">docs</a> (x.y)`},
 		{"link empty label", "[](https://x.y)", `<a href="https://x.y">https://x.y</a>`},
 		{"bullets", "- one\n* two\n  - nested", "• one\n• two\n  • nested"},
 		{"numbered untouched", "1. one\n2. two", "1. one\n2. two"},
@@ -53,7 +54,7 @@ func TestRenderMarkdown(t *testing.T) {
 // 2026-09-03 experiment; Telegram accepted the rendered result.
 const stressSample = "## Итог проверки\n\nТесты **прошли**, но `make lint` ругается на *один* файл.\n\n- `internal/app/outbound.go` — неиспользуемый импорт\n- второй пункт с [ссылкой](https://core.telegram.org/bots/api#html-style)\n  - вложенный пункт\n\n1. первый шаг\n2. второй шаг\n\n> Цитата из лога: `queue: 429 retry_after=3`\n\n```go\nfunc chunk(text string, max int) []string {\n\tif text == \"\" { return nil }\n}\n```\n\n| Проверка | Итог |\n|---|---|\n| go test -race | ✓ |\n| staticcheck | ✗ |\n\n---\nСимволы, которые ломают HTML: a < b && c > d, \"кавычки\", 5 * 3, snake_case_name, __init__."
 
-const stressWant = "<b>Итог проверки</b>\n\nТесты <b>прошли</b>, но <code>make lint</code> ругается на <i>один</i> файл.\n\n• <code>internal/app/outbound.go</code> — неиспользуемый импорт\n• второй пункт с <a href=\"https://core.telegram.org/bots/api#html-style\">ссылкой</a>\n  • вложенный пункт\n\n1. первый шаг\n2. второй шаг\n\n│ Цитата из лога: <code>queue: 429 retry_after=3</code>\n\n<pre><code class=\"language-go\">func chunk(text string, max int) []string {\n\tif text == \"\" { return nil }\n}</code></pre>\n\n<pre><code class=\"language-plaintext\">| Проверка | Итог |\n|---|---|\n| go test -race | ✓ |\n| staticcheck | ✗ |</code></pre>\n\n" + mdRuleLine + "\nСимволы, которые ломают HTML: a &lt; b &amp;&amp; c &gt; d, \"кавычки\", 5 * 3, snake_case_name, <b>init</b>."
+const stressWant = "<b>Итог проверки</b>\n\nТесты <b>прошли</b>, но <code>make lint</code> ругается на <i>один</i> файл.\n\n• <code>internal/app/outbound.go</code> — неиспользуемый импорт\n• второй пункт с <a href=\"https://core.telegram.org/bots/api#html-style\">ссылкой</a> (core.telegram.org)\n  • вложенный пункт\n\n1. первый шаг\n2. второй шаг\n\n│ Цитата из лога: <code>queue: 429 retry_after=3</code>\n\n<pre><code class=\"language-go\">func chunk(text string, max int) []string {\n\tif text == \"\" { return nil }\n}</code></pre>\n\n<pre><code class=\"language-plaintext\">| Проверка | Итог |\n|---|---|\n| go test -race | ✓ |\n| staticcheck | ✗ |</code></pre>\n\n" + mdRuleLine + "\nСимволы, которые ломают HTML: a &lt; b &amp;&amp; c &gt; d, \"кавычки\", 5 * 3, snake_case_name, <b>init</b>."
 
 func TestRenderMarkdownStressSample(t *testing.T) {
 	if got := renderMarkdown(stressSample); got != stressWant {
@@ -183,5 +184,27 @@ func TestSplitMarkdownUTF16(t *testing.T) {
 	}
 	if got := splitMarkdown("a\nb", 0); len(got) != 1 || got[0] != "a\nb" {
 		t.Errorf("max 0 = %v", got)
+	}
+}
+
+// TestRenderMarkdownLinkSafety: an agent's reply must not turn into a
+// tg:// or javascript: link, nor show one host while pointing at another.
+func TestRenderMarkdownLinkSafety(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"tg scheme is text", "[x](tg://resolve?domain=a)", "[x](tg://resolve?domain=a)"},
+		{"javascript is text", "[x](javascript:alert(1))", "[x](javascript:alert(1))"},
+		{"relative is text", "[x](/etc/passwd)", "[x](/etc/passwd)"},
+		{"spoofed url label", "[https://github.com/login](https://evil.example/)", `<a href="https://evil.example/">https://evil.example/</a>`},
+		{"label shows host", "[docs](https://go.dev/doc)", `<a href="https://go.dev/doc">docs</a> (go.dev)`},
+		{"url label same host", "[https://go.dev/doc](https://go.dev/doc)", `<a href="https://go.dev/doc">https://go.dev/doc</a>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := renderMarkdown(tt.in); got != tt.want {
+				t.Fatalf("renderMarkdown(%q)\n got  %q\n want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
