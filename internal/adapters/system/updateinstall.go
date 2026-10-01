@@ -23,17 +23,34 @@ type UpdateInstaller struct {
 	StateDir   string
 	HerdrBin   string
 	Log        *slog.Logger
-	RunCommand func(context.Context, string, string, ...string) error
+	// RunCommand replaces process execution in tests: dir, extra
+	// environment entries, binary and arguments.
+	RunCommand func(context.Context, string, []string, string, ...string) error
 	GitOutput  func(context.Context, string, ...string) (string, error)
 	Inspect    func(context.Context, string, string) (domain.CheckoutState, error)
 	OS         string
 }
 
 func (i *UpdateInstaller) run(ctx context.Context, dir, bin string, args ...string) error {
+	return i.runEnv(ctx, dir, nil, bin, args...)
+}
+
+// runEnv runs with extra environment entries on top of updateEnv.
+func (i *UpdateInstaller) runEnv(ctx context.Context, dir string, env []string, bin string, args ...string) error {
 	if i.RunCommand != nil {
-		return i.RunCommand(ctx, dir, bin, args...)
+		return i.RunCommand(ctx, dir, env, bin, args...)
 	}
-	return updateCommand(ctx, dir, bin, args...)
+	return updateCommand(ctx, dir, env, bin, args...)
+}
+
+// installerEnv tells scripts/install.sh (and install.ps1) the SHA-256 the
+// owner approved, so the script refuses a binary whose release assets were
+// swapped after approval before it ever runs it.
+func installerEnv(job domain.UpdateJob) []string {
+	if len(job.TargetChecksum) != 64 {
+		return nil
+	}
+	return []string{"HERDR_TG_EXPECTED_SHA256=" + strings.ToLower(job.TargetChecksum)}
 }
 func (i *UpdateInstaller) git(ctx context.Context, root string, args ...string) (string, error) {
 	if i.GitOutput != nil {
@@ -95,7 +112,7 @@ func (i *UpdateInstaller) Install(ctx context.Context, job domain.UpdateJob) err
 		if bin == "" {
 			bin = "herdr"
 		}
-		if err := i.run(ctx, "", bin, "plugin", "install", "permgps/herdr-telegram-agents", "--ref", job.TargetTag, "--yes"); err != nil {
+		if err := i.runEnv(ctx, "", installerEnv(job), bin, "plugin", "install", "permgps/herdr-telegram-agents", "--ref", job.TargetTag, "--yes"); err != nil {
 			return fmt.Errorf("managed install: %w", err)
 		}
 	case "local":
@@ -106,11 +123,11 @@ func (i *UpdateInstaller) Install(ctx context.Context, job domain.UpdateJob) err
 			return fmt.Errorf("fast-forward checkout: %w", err)
 		}
 		if i.hostOS() == "windows" {
-			if err := i.run(ctx, job.SourceRoot, "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/install.ps1"); err != nil {
+			if err := i.runEnv(ctx, job.SourceRoot, installerEnv(job), "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "scripts/install.ps1"); err != nil {
 				return fmt.Errorf("checked installer: %w", err)
 			}
 		} else {
-			if err := i.run(ctx, job.SourceRoot, "sh", "scripts/install.sh"); err != nil {
+			if err := i.runEnv(ctx, job.SourceRoot, installerEnv(job), "sh", "scripts/install.sh"); err != nil {
 				return fmt.Errorf("checked installer: %w", err)
 			}
 		}
@@ -201,11 +218,17 @@ func copyUpdateFile(source, destination string) error {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(destination+".tmp", os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o700)
+	// A unique name: a copy killed half-way leaves its file behind, and a
+	// fixed name would make every later copy (the rollback) fail.
+	out, err := os.CreateTemp(filepath.Dir(destination), "."+filepath.Base(destination)+".*")
 	if err != nil {
 		return err
 	}
-	defer os.Remove(destination + ".tmp")
+	defer os.Remove(out.Name())
+	if err := out.Chmod(0o700); err != nil {
+		_ = out.Close()
+		return err
+	}
 	if _, err := io.Copy(out, in); err != nil {
 		_ = out.Close()
 		return err
@@ -220,15 +243,24 @@ func copyUpdateFile(source, destination string) error {
 	if runtime.GOOS == "windows" {
 		_ = os.Remove(destination)
 	}
-	return os.Rename(destination+".tmp", destination)
+	return os.Rename(out.Name(), destination)
 }
 
-func updateCommand(ctx context.Context, dir, bin string, args ...string) error {
+// updateEnv is the environment for update commands: the daemon's own minus
+// the installer's download overrides, which must never reach a production
+// update, plus extra.
+func updateEnv(extra []string) []string {
+	env := withoutEnv(os.Environ(), "HERDR_TG_BASE_URL", "HERDR_TG_ALLOW_INSECURE_BASE", "HERDR_TG_EXPECTED_SHA256")
+	env = append(env, "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat")
+	return append(env, extra...)
+}
+
+func updateCommand(ctx context.Context, dir string, extra []string, bin string, args ...string) error {
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	cmd := command(callCtx, bin, args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat")
+	cmd.Env = updateEnv(extra)
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s failed: %w", strings.TrimSpace(filepath.Base(bin)), err)

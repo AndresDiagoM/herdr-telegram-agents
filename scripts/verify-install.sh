@@ -11,8 +11,8 @@
 # containers and that temporary directory is touched, and the directory is
 # removed at the end.
 #
-# HERDR_TG_BASE_URL is passed through, so a local snapshot can be verified
-# before a tag exists.
+# HERDR_TG_BASE_URL and HERDR_TG_ALLOW_INSECURE_BASE are passed through, so
+# a local snapshot (served over http) can be verified before a tag exists.
 set -eu
 
 version=${1:-}
@@ -37,6 +37,7 @@ verify_linux() {
 		echo "verify: linux/${arch} in debian:bookworm-slim"
 		docker run --rm --platform "linux/${arch}" \
 			-e "HERDR_TG_BASE_URL=${HERDR_TG_BASE_URL:-}" \
+			-e "HERDR_TG_ALLOW_INSECURE_BASE=${HERDR_TG_ALLOW_INSECURE_BASE:-}" \
 			debian:bookworm-slim sh -c "
 				set -eu
 				apt-get update -qq >/dev/null
@@ -62,6 +63,7 @@ verify_macos() {
 	git clone --depth 1 --branch "$tag" "$repo_url" "$dir/plugin" >/dev/null 2>&1
 	env -i HOME="$HOME" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
 		HERDR_TG_BASE_URL="${HERDR_TG_BASE_URL:-}" \
+		HERDR_TG_ALLOW_INSECURE_BASE="${HERDR_TG_ALLOW_INSECURE_BASE:-}" \
 		sh -c "cd '$dir/plugin' && sh scripts/install.sh"
 	"$dir/plugin/bin/herdr-tg" version
 	rm -rf "$dir"
