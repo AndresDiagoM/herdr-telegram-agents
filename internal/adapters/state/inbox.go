@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/permgps/herdr-telegram-agents/internal/domain"
@@ -24,11 +26,19 @@ const (
 	inboxFileMode = 0o600
 )
 
+// defaultInboxMaxTotal is the total size the inbox keeps when MaxTotal is
+// not set; it matches the default of domain.OptionInboxMaxTotalMB.
+const defaultInboxMaxTotal = 500 << 20
+
 // Inbox implements domain.InboxStore over STATE_DIR/inbox.
 type Inbox struct {
 	dir string
 	log *slog.Logger
 	now func() time.Time
+	// MaxTotal is the most the inbox holds in bytes, read on every Save;
+	// nil means defaultInboxMaxTotal.
+	MaxTotal func() int64
+	mu       sync.Mutex
 }
 
 var _ domain.InboxStore = (*Inbox)(nil)
@@ -56,6 +66,11 @@ func (i *Inbox) Save(_ context.Context, name string, data []byte) (string, error
 	if err := os.MkdirAll(i.dir, inboxDirMode); err != nil {
 		return "", fmt.Errorf("inbox: mkdir %s: %w", i.dir, err)
 	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if err := i.makeRoom(int64(len(data))); err != nil {
+		return "", err
+	}
 	path, err := i.freePath(name)
 	if err != nil {
 		return "", err
@@ -69,6 +84,60 @@ func (i *Inbox) Save(_ context.Context, name string, data []byte) (string, error
 	}
 	i.log.Debug("inbox saved", slog.String("path", abs), slog.Int("bytes", len(data)))
 	return abs, nil
+}
+
+// makeRoom deletes the oldest files until need more bytes fit under the
+// total quota. A file larger than the whole quota is refused.
+func (i *Inbox) makeRoom(need int64) error {
+	limit := int64(defaultInboxMaxTotal)
+	if i.MaxTotal != nil {
+		limit = i.MaxTotal()
+	}
+	if need > limit {
+		i.log.Warn("[FIX] inbox file exceeds the total quota", slog.Int64("bytes", need), slog.Int64("quota", limit))
+		return fmt.Errorf("inbox: %d bytes exceed the %d byte quota: %w", need, limit, domain.ErrFileTooBig)
+	}
+	entries, err := os.ReadDir(i.dir)
+	if err != nil {
+		return fmt.Errorf("inbox: list %s: %w", i.dir, err)
+	}
+	type file struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var files []file
+	var total int64
+	for _, e := range entries {
+		if !e.Type().IsRegular() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, file{filepath.Join(i.dir, e.Name()), info.Size(), info.ModTime()})
+		total += info.Size()
+	}
+	if total+need <= limit {
+		return nil
+	}
+	sort.Slice(files, func(a, b int) bool { return files[a].mod.Before(files[b].mod) })
+	for _, f := range files {
+		if total+need <= limit {
+			break
+		}
+		if err := os.Remove(f.path); err != nil {
+			i.log.Warn("inbox delete failed", slog.String("path", f.path), slog.String("err", err.Error()))
+			continue
+		}
+		total -= f.size
+		i.log.Info("[FIX] inbox quota: oldest file deleted", slog.String("path", f.path), slog.Int64("bytes", f.size), slog.Int64("quota", limit))
+	}
+	if total+need > limit {
+		return fmt.Errorf("inbox: no room for %d bytes under the %d byte quota: %w", need, limit, domain.ErrFileTooBig)
+	}
+	return nil
 }
 
 // freePath returns dir/name, or dir/name-N.ext for the first N from 2 that

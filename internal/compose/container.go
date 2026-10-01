@@ -324,6 +324,7 @@ func BuildDaemon(ctx context.Context, env PluginEnv, cfg domain.Config, log *slo
 	reconciler := app.NewReconciler(app.NewRedactingGateway(tg, cfg.BotToken, opts.RedactEnabled, log), hg, mappings, mapping, opts, clock, log)
 	capture := app.NewCapture(hg, registry.Live, clock, log)
 	inbox := state.NewInbox(env.StateDir, log)
+	inbox.MaxTotal = opts.InboxMaxTotalBytes
 	bridge := app.NewBridge(cfg, hg, tg, registry, reconciler, capture, opts,
 		app.Services{Replies: domain.MultiReplySource{
 			transcript.NewReader(log),

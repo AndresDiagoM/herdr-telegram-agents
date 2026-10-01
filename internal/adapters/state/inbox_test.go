@@ -2,6 +2,7 @@ package state_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/permgps/herdr-telegram-agents/internal/adapters/state"
+	"github.com/permgps/herdr-telegram-agents/internal/domain"
 )
 
 func TestInboxSaveCreatesDirAndFile(t *testing.T) {
@@ -101,5 +103,38 @@ func TestInboxSweepEmptyDir(t *testing.T) {
 	n, err := in.Sweep(context.Background(), time.Hour)
 	if err != nil || n != 0 {
 		t.Fatalf("Sweep on a missing inbox = %d, %v", n, err)
+	}
+}
+
+// TestInboxTotalQuota: attachments stay within a total size. When a new
+// file would go over, the oldest files go first; a file bigger than the
+// whole quota is refused.
+func TestInboxTotalQuota(t *testing.T) {
+	ctx := context.Background()
+	in := state.NewInbox(t.TempDir(), nil)
+	in.MaxTotal = func() int64 { return 25 }
+	old, err := in.Save(ctx, "old.bin", make([]byte, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	mid, err := in.Save(ctx, "mid.bin", make([]byte, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := in.Save(ctx, "new.bin", make([]byte, 10)); err != nil {
+		t.Fatalf("save over quota: %v", err)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("oldest file kept: %v", err)
+	}
+	if _, err := os.Stat(mid); err != nil {
+		t.Fatalf("newer file removed: %v", err)
+	}
+	if _, err := in.Save(ctx, "huge.bin", make([]byte, 26)); !errors.Is(err, domain.ErrFileTooBig) {
+		t.Fatalf("file over the whole quota = %v", err)
 	}
 }

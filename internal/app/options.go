@@ -115,6 +115,9 @@ func (o *Options) InboxEnabled() bool { return o.Get().InboxEnabled() }
 // InboxMaxBytes mirrors domain.Options.InboxMaxBytes.
 func (o *Options) InboxMaxBytes() int64 { return o.Get().InboxMaxBytes() }
 
+// InboxMaxTotalBytes mirrors domain.Options.InboxMaxTotalBytes.
+func (o *Options) InboxMaxTotalBytes() int64 { return o.Get().InboxMaxTotalBytes() }
+
 // InboxDeleteAfter mirrors domain.Options.InboxDeleteAfter.
 func (o *Options) InboxDeleteAfter() time.Duration { return o.Get().InboxDeleteAfter() }
 
