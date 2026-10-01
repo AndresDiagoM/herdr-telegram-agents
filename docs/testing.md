@@ -156,7 +156,7 @@ Telegram group on a phone.
 - [x] **File too big**: a 25 MB document → `⚠️ file too big: 25 MB > 20 MB`, nothing saved (2026-09-06: a 25.5 MB CSV, `attachment refused reason=too_big`)
 - [x] **Inbox off**: `/options` → Inbox → untick `Accept files` → a photo answers `⚠️ inbox is off (/options → Inbox)`; tick it again
 - [x] **git status and diff**: in this repository's topic `/git status` → a quoted code block starting `## <branch>`; `/git diff` with a change larger than a message → a `herdr_tg-diff-<hhmmss>.patch` file with the caption `git diff HEAD · N lines`; `/git log 3` → three lines; `/git push` → `usage: /git status | diff [staged] | log [N]` (2026-09-06: status 5 lines inline, diff of 501 lines as a document, log 3 lines, push refused)
-- [x] **git outside a repository**: `/git status` in the topic of an agent whose pane runs outside a repository (`/new` in a scratch workspace) → `⚠️ not a git repository: <cwd>`
+- [x] **git outside a repository**: `/git status` in the topic of an agent whose pane runs outside a repository (`/new` in a scratch workspace) → `⚠️ not a git repository`
 - [x] **Done**: a finished agent posts its tail silently
 - [x] **Reactions**: with `React to prompts` at its default (off) a plain prompt gets no reaction and the log has `reaction skipped` at debug level; tick it in `/options` → Posts → a plain prompt gets 👀 within a second and 👌 when the turn ends (done, or 5 s of idle); a `y` reply to a dialog gets none
 - [x] **Question delay**: `/options` → Posts → `Question delay` → `10s`; answer a Claude Code question in Herdr within 10 s → no post, log `screen skipped … reason=not_blocked`; leave the next one unanswered → posted after ~11.5 s with buttons, log `capture compared`; set it back to `Off`

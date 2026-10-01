@@ -7,6 +7,7 @@ import (
 	"html"
 	"log/slog"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -900,7 +901,7 @@ const (
 	inboxTooBigFmt  = "⚠️ file too big: %s > %s"
 	inboxFailedFmt  = "⚠️ download failed: %s"
 	inboxPartialFmt = "⚠️ %d of %d files failed: %s"
-	inboxGoneFmt    = "⚠️ agent has exited, file kept at %s"
+	inboxGoneFmt    = "⚠️ agent has exited, file kept in the inbox: %s"
 	inboxNoStore    = "⚠️ inbox is not available in this build"
 	// albumPrefix marks the debouncer key of a media group.
 	albumPrefix = "album:"
@@ -1072,7 +1073,7 @@ func (i *inbound) InboxFinished(ctx context.Context, r inboxResult) error {
 	entry, hasTopic := i.topics.Entry(r.key)
 	if _, alive := i.agents(r.key); !alive || !hasTopic || !entry.Status.Live() {
 		i.log.Info("inbox delivery to exited agent", slog.String("key", r.key.String()), slog.Int("message_id", r.messageID))
-		return i.reply(ctx, r.threadID, r.messageID, fmt.Sprintf(inboxGoneFmt, strings.Join(r.paths, ", ")))
+		return i.reply(ctx, r.threadID, r.messageID, fmt.Sprintf(inboxGoneFmt, strings.Join(baseNames(r.paths), ", ")))
 	}
 	if err := i.herdr.Prompt(ctx, r.key.PaneID, domain.AttachmentPrompt(r.caption, r.paths)); err != nil {
 		return i.failed(ctx, msg, r.key, "prompt", err)
@@ -1240,15 +1241,62 @@ func (i *inbound) absorb(err error) error {
 }
 
 // failureReason renders a Herdr error for the operator in one line.
+// failureReason words an error for a Telegram reply: known sentinels get a
+// fixed text, anything else its first line with absolute paths cut to the
+// base name, so a reply never shows the machine's user name or project
+// layout. detailReason keeps the full line for local diagnostics.
 func failureReason(err error) string {
-	if errors.Is(err, domain.ErrAgentGone) {
+	switch {
+	case errors.Is(err, domain.ErrAgentGone):
 		return "agent is gone"
-	}
-	if errors.Is(err, domain.ErrDisconnected) {
+	case errors.Is(err, domain.ErrDisconnected):
 		return "herdr is unreachable"
+	case errors.Is(err, domain.ErrNotRepository):
+		return "not a git repository"
+	case errors.Is(err, domain.ErrGitMissing):
+		return "git is not installed"
+	case errors.Is(err, domain.ErrFileTooBig):
+		return "file is too big"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
 	}
+	return scrubPaths(detailReason(err))
+}
+
+// scrubPaths cuts absolute paths to "…/<base name>". A match counts only at
+// the start of a word, so URLs and relative paths stay as they are.
+func scrubPaths(line string) string {
+	var b strings.Builder
+	last := 0
+	for _, m := range absPath.FindAllStringIndex(line, -1) {
+		if m[0] > 0 && !strings.ContainsRune(" \t('\"=", rune(line[m[0]-1])) {
+			continue
+		}
+		b.WriteString(line[last:m[0]])
+		b.WriteString("…/" + filepath.Base(strings.ReplaceAll(line[m[0]:m[1]], `\`, "/")))
+		last = m[1]
+	}
+	b.WriteString(line[last:])
+	return b.String()
+}
+
+// absPath matches an absolute Unix or Windows path inside an error text.
+var absPath = regexp.MustCompile(`(?:/[^\s:'"/]+){2,}|[A-Za-z]:\\[^\s:'"]+`)
+
+// detailReason is the error's first line, for local output (the doctor
+// action) where paths help.
+func detailReason(err error) string {
 	line, _, _ := strings.Cut(err.Error(), "\n")
 	return strings.TrimSpace(line)
+}
+
+// baseNames strips the directories: replies name files, not local paths.
+func baseNames(paths []string) []string {
+	out := make([]string, len(paths))
+	for i, p := range paths {
+		out[i] = filepath.Base(p)
+	}
+	return out
 }
 
 func plural(n int, noun string) string {
