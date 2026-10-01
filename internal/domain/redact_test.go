@@ -112,3 +112,48 @@ func TestRedactionStatsString(t *testing.T) {
 		t.Fatal("empty stats should render empty")
 	}
 }
+
+// TestRedactPrefixedKeysAndCredentials covers secrets the first rule set
+// missed: env names with a prefix or suffix around the keyword, JSON keys,
+// query parameters, URL credentials, HTTP Basic and Stripe keys.
+func TestRedactPrefixedKeysAndCredentials(t *testing.T) {
+	r := domain.NewRedactor()
+	cases := []struct {
+		name  string
+		in    string
+		want  string
+		stats string
+	}{
+		{"db password", "DB_PASSWORD=supersecret1", "DB_PASSWORD=[redacted]", "keyvalue=1"},
+		{"postgres password", "POSTGRES_PASSWORD=supersecret1", "POSTGRES_PASSWORD=[redacted]", "keyvalue=1"},
+		{"aws secret", "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI" + "K7MDENGbPxRfiCYEXAMPLEKEY", "AWS_SECRET_ACCESS_KEY=[redacted]", "keyvalue=1"},
+		{"client secret", "client_secret=abcdefgh1234", "client_secret=[redacted]", "keyvalue=1"},
+		{"secret key yaml", "secret_key: abcdefgh1234", "secret_key: [redacted]", "keyvalue=1"},
+		{"github token env", "GITHUB_TOKEN=abcdefgh12345678", "GITHUB_TOKEN=[redacted]", "keyvalue=1"},
+		{"query token", "https://x.example/cb?access_token=abcdefgh12345678&state=1", "https://x.example/cb?access_token=[redacted]&state=1", "keyvalue=1"},
+		{"json password", `{"password": "hunter2secret"}`, `{"password": "[redacted]"}`, "keyvalue=1"},
+		{"url credentials", "postgres://app:pa55word@db.local/app", "postgres://app:[redacted]@db.local/app", "urlcreds=1"},
+		{"basic auth", "Authorization: Basic dXNlcjpwYXNzd29yZA==", "Authorization: Basic …ZA==", "basic=1"},
+		{"stripe live", "sk_live_" + "abcdefghijklmnopqrstuvwx", "sk_live_…uvwx", "stripe=1"},
+		{"stripe restricted", "rk_test_" + "abcdefghijklmnopqrstuvwx", "rk_test_…uvwx", "stripe=1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, stats := r.Redact(tc.in)
+			if got != tc.want {
+				t.Errorf("Redact(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if stats.String() != tc.stats {
+				t.Errorf("stats = %q, want %q", stats.String(), tc.stats)
+			}
+			if again, s := r.Redact(got); again != got || s.Total() != 0 {
+				t.Errorf("second pass changed %q to %q", got, again)
+			}
+		})
+	}
+	for _, in := range []string{`"tokens": 12`, "password_reset_url", "TOKEN_LIMIT=4000", "max_tokens=4096", "git@github.com:org/repo.git", "https://example.com:8443/path"} {
+		if got, stats := r.Redact(in); got != in || stats.Total() != 0 {
+			t.Errorf("Redact(%q) = %q; want unchanged", in, got)
+		}
+	}
+}

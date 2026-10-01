@@ -63,8 +63,9 @@ const (
 	// redactKeepEnds keeps group 1 (the prefix) and the last four
 	// characters of the match, with an ellipsis between.
 	redactKeepEnds
-	// redactKeyValue keeps groups 1 and 2 (key and separator) and replaces
-	// group 3 (the value) with redactedMark.
+	// redactKeyValue replaces the last group (the value) with redactedMark
+	// and keeps the rest of the match: the key and separator before it and
+	// anything after it (the `@` of URL credentials).
 	redactKeyValue
 )
 
@@ -81,7 +82,14 @@ type redactRule struct {
 var redactRules = []redactRule{
 	{"privatekey", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|\z)`), redactWhole},
 	{"telegram", regexp.MustCompile(`\b\d{8,10}:[A-Za-z0-9_-]{35}\b`), redactWhole},
-	{"keyvalue", regexp.MustCompile(`(?i)\b(password|passwd|pwd|secret|token|api[_-]?key)(\s*[=:]\s*['"]?)([^\s'"\[][^\s'"]{7,})`), redactKeyValue},
+	// URL credentials run before keyvalue so a key-like user name does not
+	// swallow the host.
+	{"urlcreds", regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://[^\s:/@]+:)([^\s@/\[][^\s@/]*)@`), redactKeyValue},
+	// The keyword may sit inside a longer name (DB_PASSWORD, client_secret,
+	// access_token) and a JSON key's closing quote may precede the
+	// separator. `&` ends a value so query strings keep their other
+	// parameters.
+	{"keyvalue", regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credentials?)[A-Za-z0-9_.-]*)(["']?\s*[=:]\s*['"]?)([^\s'"\[&][^\s'"&]{7,})`), redactKeyValue},
 	{"openai", regexp.MustCompile(`\b(sk-)[A-Za-z0-9_-]{20,}`), redactKeepEnds},
 	{"github", regexp.MustCompile(`\b(gh[poushr]_)[A-Za-z0-9]{36,}`), redactKeepEnds},
 	{"github", regexp.MustCompile(`\b(github_pat_)[A-Za-z0-9_]{22,}`), redactKeepEnds},
@@ -91,6 +99,8 @@ var redactRules = []redactRule{
 	{"google", regexp.MustCompile(`\b(AIza)[0-9A-Za-z_-]{35}\b`), redactKeepEnds},
 	{"jwt", regexp.MustCompile(`\b(eyJ)[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}`), redactKeepEnds},
 	{"bearer", regexp.MustCompile(`(?i)\b(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}`), redactKeepEnds},
+	{"basic", regexp.MustCompile(`(?i)\b(Basic\s+)[A-Za-z0-9+/=]{12,}`), redactKeepEnds},
+	{"stripe", regexp.MustCompile(`\b([sr]k_(?:live|test)_)[A-Za-z0-9]{16,}`), redactKeepEnds},
 }
 
 // NewRedactor returns a redactor that also replaces the given exact
@@ -154,7 +164,8 @@ func (rule redactRule) replacement(text string, m []int) string {
 		}
 		return prefix + "…" + whole[len(whole)-keepEndsTail:]
 	case redactKeyValue:
-		return text[m[2]:m[3]] + text[m[4]:m[5]] + redactedMark
+		start, end := m[len(m)-2], m[len(m)-1]
+		return text[m[0]:start] + redactedMark + text[end:m[1]]
 	default:
 		return redactedMark
 	}
