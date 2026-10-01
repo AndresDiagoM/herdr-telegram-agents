@@ -20,9 +20,9 @@ import (
 // Command output is deliberately discarded: installers and Git helpers can
 // print credentials or repository content on failure.
 type UpdateInstaller struct {
-	StateDir   string
-	HerdrBin   string
-	Log        *slog.Logger
+	StateDir string
+	HerdrBin string
+	Log      *slog.Logger
 	// RunCommand replaces process execution in tests: dir, extra
 	// environment entries, binary and arguments.
 	RunCommand func(context.Context, string, []string, string, ...string) error
