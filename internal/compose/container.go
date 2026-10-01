@@ -85,7 +85,7 @@ func BuildDoctor(env PluginEnv, version string, log *slog.Logger) *Doctor {
 		Options:       state.NewOptionsStore(env.ConfigDir, log),
 		Mapping:       mappings,
 		Broken:        mappings.BrokenFiles,
-		Pid:           state.NewPidFile(env.StateDir, proc.Alive, log),
+		Pid:           state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime),
 		Alive:         proc.Alive,
 		ControlStatus: proc.Status,
 		Inspector: func(cfg domain.Config) (domain.TelegramInspector, error) {
@@ -196,13 +196,13 @@ func PaneOpener(env PluginEnv, log *slog.Logger) domain.PaneOpener {
 // NewPidFile returns the daemon pid file with process liveness checks.
 func NewPidFile(env PluginEnv, log *slog.Logger) domain.PidFile {
 	proc := system.NewProcess(env.StateDir, log)
-	return state.NewPidFile(env.StateDir, proc.Alive, log)
+	return state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime)
 }
 
 // BuildSupervisor wires pid file and process control for the actions.
 func BuildSupervisor(env PluginEnv, log *slog.Logger) *Supervisor {
 	proc := system.NewProcess(env.StateDir, log)
-	pid := state.NewPidFile(env.StateDir, proc.Alive, log)
+	pid := state.NewPidFile(env.StateDir, proc.Alive, log).CheckStart(proc.StartTime)
 	return app.NewSupervisor(pid, proc, realClock{}, log)
 }
 

@@ -9,6 +9,10 @@ import (
 type PidInfo struct {
 	PID   int
 	Since time.Time
+	// Verified means the process behind PID provably started before the
+	// pid file was written, so it is the daemon and not a reused pid.
+	// False when the platform cannot report a start time.
+	Verified bool
 }
 
 // PidFile is the single-instance lock of the daemon. Acquire fails with
