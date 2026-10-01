@@ -88,7 +88,8 @@ func newCodexFixture(t *testing.T) *codexFixture {
 
 // rolloutDir is the day directory Codex would use for id.
 func (f *codexFixture) rolloutDir(id string) string {
-	dirs, _ := codexDayDirs(id, time.Time{})
+	ms, _ := codexV7Millis(id)
+	dirs, _ := codexDayDirs(id, time.UnixMilli(ms))
 	if len(dirs) == 0 {
 		f.t.Fatalf("no day directory for %s", id)
 	}
@@ -567,7 +568,8 @@ func TestCodexDayDirs(t *testing.T) {
 	if dirs, complete := codexDayDirs("01a0de3a-aaaa-4aaa-8aaa-aaaaaaaaaaaa", time.Time{}); dirs != nil || complete {
 		t.Fatalf("a version 4 uuid must not guess day directories: %v, complete %v", dirs, complete)
 	}
-	dirs, complete := codexDayDirs(codexTestID, time.Time{})
+	ms, _ := codexV7Millis(codexTestID)
+	dirs, complete := codexDayDirs(codexTestID, time.UnixMilli(ms))
 	if !complete {
 		t.Fatal("the creation days must be a complete search before the thread is two days old")
 	}

@@ -25,7 +25,11 @@ func (f *codexFixture) sessions() string { return filepath.Join(f.home, ".codex"
 // dayDirs are the shortcut's day directories for the test thread.
 func (f *codexFixture) dayDirs() []string {
 	var dirs []string
-	days, _ := codexDayDirs(codexTestID, f.clock)
+	clock := f.clock
+	if clock.IsZero() {
+		clock = codexCreated
+	}
+	days, _ := codexDayDirs(codexTestID, clock)
 	for _, d := range days {
 		dirs = append(dirs, filepath.Join(f.sessions(), d))
 	}
@@ -234,9 +238,9 @@ func TestCodexRevertedThreadUsesItsNewestRollout(t *testing.T) {
 		},
 		"several reverts": func(f *codexFixture) {
 			day := f.dayDirs()[0]
-			f.writeNamed(day, "rollout-2026-09-26T10-30-00-"+codexTestID+"_"+codexRevertB+".jsonl", stale...)
+			f.writeNamed(day, "rollout-2026-09-26T10-30-00-"+codexTestID+"_"+codexRevertA+".jsonl", stale...)
 			f.writeNamed(day, plain, stale...)
-			f.writeNamed(day, "rollout-2026-09-26T11-00-00-"+codexTestID+"_"+codexRevertA+".jsonl", current...)
+			f.writeNamed(day, "rollout-2026-09-26T11-00-00-"+codexTestID+"_"+codexRevertB+".jsonl", current...)
 		},
 		"same second": func(f *codexFixture) {
 			day := f.dayDirs()[0]
@@ -533,4 +537,62 @@ func TestCodexLinksThatMayHideARolloutFallBack(t *testing.T) {
 		codexLink(t, outside, filepath.Join(f.sessions(), "2027"))
 		f.wantNoReply("linked directory")
 	})
+}
+
+// codexRevertV4 is a rollout id that is not a UUIDv7, so it carries no time.
+const codexRevertV4 = "01a0de3a-ffff-4fff-8fff-ffffffffffff"
+
+// TestCodexRolloutOrderIgnoresWallClock covers file name stamps that go
+// backwards: the hour that repeats when daylight saving ends, or a move to a
+// zone further west. The rollout id's UUIDv7 time, which is UTC, decides.
+func TestCodexRolloutOrderIgnoresWallClock(t *testing.T) {
+	f := newCodexFixture(t)
+	day := f.dayDirs()[0]
+	f.writeNamed(day, "rollout-2026-09-26T10-30-00-"+codexTestID+".jsonl",
+		append([]string{codexMeta(codexTestID)}, codexTurn("turn-a", "m", "STALE ANSWER", 1)...)...)
+	f.writeNamed(day, "rollout-2026-09-26T10-10-00-"+codexTestID+"_"+codexRevertA+".jsonl",
+		append([]string{codexMeta(codexTestID)}, codexTurn("turn-a", "m", "CURRENT ANSWER", 1)...)...)
+	r, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || r.Text != "CURRENT ANSWER" {
+		t.Fatalf("reply = %q, err = %v; want the newer rollout by its id's time", r.Text, err)
+	}
+}
+
+// TestCodexRolloutIDWithoutTime covers a rollout id that is not a UUIDv7:
+// alone it is the thread's only file and is read; next to another file of
+// the thread it cannot be ordered, so the screen is posted.
+func TestCodexRolloutIDWithoutTime(t *testing.T) {
+	odd := "rollout-2026-09-26T11-00-00-" + codexTestID + "_" + codexRevertV4 + ".jsonl"
+	body := append([]string{codexMeta(codexTestID)}, codexTurn("turn-a", "m", "ODD ANSWER", 1)...)
+	t.Run("alone", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.writeNamed(f.dayDirs()[0], odd, body...)
+		r, err := f.reader().LastReply(context.Background(), f.agent())
+		if err != nil || r.Text != "ODD ANSWER" {
+			t.Fatalf("reply = %q, err = %v", r.Text, err)
+		}
+	})
+	t.Run("next to the original", func(t *testing.T) {
+		f := newCodexFixture(t)
+		f.write(codexTestID, codexTurn("turn-a", "m", "STALE ANSWER", 1)...)
+		f.writeNamed(f.dayDirs()[0], odd, body...)
+		f.wantNoReply("unordered rollout ids")
+	})
+}
+
+// TestCodexClockBehindCreation covers a clock set back after the thread was
+// created: a revert then lands in a day before the creation day, which only
+// the whole tree walk reaches.
+func TestCodexClockBehindCreation(t *testing.T) {
+	f := newCodexFixture(t)
+	f.clock = codexCreated.AddDate(0, 0, -3)
+	f.write(codexTestID, codexTurn("removed", "m", "REMOVED-ANSWER", 1)...)
+	f.writeReplacement(-3)
+	r, err := f.reader().LastReply(context.Background(), f.agent())
+	if err != nil || r.Text != "CURRENT-ANSWER" {
+		t.Fatalf("reply = %q, err = %v; want the replacement found by the walk", r.Text, err)
+	}
+	if dirs, complete := codexDayDirs(codexTestID, f.clock); complete || dirs != nil {
+		t.Fatalf("a clock behind creation must not be a complete search: %v", dirs)
+	}
 }

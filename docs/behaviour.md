@@ -252,8 +252,11 @@ option of the Posts group:
   directories included. A thread that Codex reverted continues in a new file,
   `rollout-<time>-<thread id>_<rollout id>.jsonl`, in the day directory of the
   revert; the reader looks at every day from the thread's creation to now and
-  takes the newest of the thread's files. For a thread older than a year it
-  walks the whole sessions tree instead, within the same 50,000 entries. When
+  takes the newest of the thread's files, ordered by the rollout id's UUIDv7
+  time (UTC), not by the local time in the file name; when several files
+  exist and one id carries no time, the screen is posted. For a thread older
+  than a year, or when the clock is behind the thread's creation, it walks
+  the whole sessions tree instead, within the same 50,000 entries. When
   the search cannot establish the newest file (the budget runs out, a
   directory cannot be opened or listed, or a link stands where the thread's
   rollout or, in the walk, a directory could be), it posts the screen rather

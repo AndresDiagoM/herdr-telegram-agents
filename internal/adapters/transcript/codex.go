@@ -202,10 +202,32 @@ type codexRollout struct {
 	rel   string // path below the sessions root
 	stamp string // the file name's timestamp, fixed width so it sorts as text
 	rid   string // the rollout id: the thread id unless the thread was reverted
+	ms    int64  // the rollout id's UUIDv7 time
+	v7    bool   // whether the rollout id is a UUIDv7
 }
 
+// newerThan orders by the rollout id's UUIDv7 time, which is UTC: the file
+// name's stamp is local wall time and goes backwards when daylight saving
+// ends or the machine changes zone. The stamp and then the id only break a
+// tie within one millisecond.
 func (c codexRollout) newerThan(o codexRollout) bool {
+	if c.ms != o.ms {
+		return c.ms > o.ms
+	}
 	return c.stamp > o.stamp || c.stamp == o.stamp && c.rid > o.rid
+}
+
+// codexV7Millis returns the creation time in milliseconds a UUIDv7 carries in
+// its first 48 bits; ok is false for any other UUID.
+func codexV7Millis(id string) (ms int64, ok bool) {
+	raw, err := hex.DecodeString(strings.ReplaceAll(id[:13], "-", ""))
+	if err != nil || len(raw) != 6 || id[14] != '7' {
+		return 0, false
+	}
+	for _, b := range raw {
+		ms = ms<<8 | int64(b)
+	}
+	return ms, true
 }
 
 const codexStampLen = len("2006-01-02T15-04-05")
@@ -244,6 +266,9 @@ type codexSearch struct {
 	id   string
 	left int
 	best *codexRollout
+	// found counts the thread's rollout files, and odd those whose id is not
+	// a UUIDv7: with several files, such an id cannot be ordered.
+	found, odd int
 }
 
 // scan reads dir, a path below the root, and offers every rollout file of the
@@ -308,6 +333,11 @@ func (s *codexSearch) offer(dir, name string) {
 		return
 	}
 	c := codexRollout{rel: filepath.Join(dir, name), stamp: stamp, rid: rid}
+	c.ms, c.v7 = codexV7Millis(rid)
+	s.found++
+	if !c.v7 {
+		s.odd++
+	}
 	if s.best == nil || c.newerThan(*s.best) {
 		s.best = &c
 	}
@@ -349,6 +379,8 @@ func findCodexRollout(ctx context.Context, root *os.Root, id string, now time.Ti
 		err = s.scan(".", true)
 	}
 	switch {
+	case err == nil && s.best != nil && s.found > 1 && s.odd > 0:
+		return "", nil, fmt.Errorf("%w: the newest rollout cannot be told apart", domain.ErrNoReply)
 	case err == nil && s.best != nil:
 		seen, lerr := root.Lstat(s.best.rel)
 		if lerr != nil || !seen.Mode().IsRegular() {
@@ -439,18 +471,19 @@ func codexCheckThread(f io.ReaderAt, size int64, id string) error {
 // creation time, UTC and local, then every later day up to until, where a
 // reverted thread continues in a new file. complete reports whether the
 // later days reach until; past codexLaterDays they do not, and a newer file
-// may be in a day that is not listed. A UUID that is not version 7 yields
-// none and is never complete.
+// may be in a day that is not listed, nor when until is before the creation
+// day. A UUID that is not version 7 yields none and is never complete.
 func codexDayDirs(id string, until time.Time) (dirs []string, complete bool) {
-	raw, err := hex.DecodeString(strings.ReplaceAll(id[:13], "-", ""))
-	if err != nil || len(raw) != 6 || id[14] != '7' {
+	ms, ok := codexV7Millis(id)
+	if !ok {
 		return nil, false
 	}
-	var ms int64
-	for _, b := range raw {
-		ms = ms<<8 | int64(b)
-	}
 	created := time.UnixMilli(ms)
+	if until.Before(created.AddDate(0, 0, -1)) {
+		// The clock is behind the thread's creation, so a later file may
+		// sit in a day before it: only the whole tree can tell.
+		return nil, false
+	}
 	seen := map[string]bool{}
 	add := func(t time.Time) {
 		for _, loc := range []*time.Location{time.UTC, time.Local} {
