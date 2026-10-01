@@ -29,6 +29,9 @@ type Sharing struct {
 	disabled  bool
 	dirty     bool
 	lastSave  time.Time
+	// contactWindow and contactCount meter first contacts per minute.
+	contactWindow time.Time
+	contactCount  int
 }
 
 func NewSharing(ctx context.Context, store domain.SharingStore, log *slog.Logger) *Sharing {
@@ -72,6 +75,24 @@ func (s *Sharing) Grantee(actor int64) bool {
 	return false
 }
 
+// MaxNewContactsPerMinute caps first-contact registrations. Each one is a
+// durable write on the Telegram polling path, so a flood of new accounts
+// must not turn into a write per account.
+const MaxNewContactsPerMinute = 30
+
+// newContactAllowed counts a first contact against the per-minute cap.
+// Called with s.mu held.
+func (s *Sharing) newContactAllowed(now time.Time) bool {
+	if now.Sub(s.contactWindow) >= time.Minute {
+		s.contactWindow, s.contactCount = now, 0
+	}
+	if s.contactCount >= MaxNewContactsPerMinute {
+		return false
+	}
+	s.contactCount++
+	return true
+}
+
 // Register saves first contact before onboarding can be acknowledged. Later
 // metadata refreshes retain owner-hidden state and are coalesced by Flush.
 func (s *Sharing) Register(ctx context.Context, id, chatID int64, name, username string, now time.Time) (bool, error) {
@@ -87,6 +108,10 @@ func (s *Sharing) Register(ctx context.Context, id, chatID int64, name, username
 	if !exists && len(s.state.Recipients) >= domain.MaxRecipients {
 		s.log.Warn("private recipient capacity reached")
 		return false, ErrSharingCapacity
+	}
+	if !exists && !s.newContactAllowed(now) {
+		s.log.Warn("[FIX] new private contact refused: first contacts arrive too fast", slog.Int("per_minute", MaxNewContactsPerMinute))
+		return false, domain.ErrRegistrationBusy
 	}
 	if !exists {
 		r = domain.Recipient{ID: id, ChatID: chatID, FirstSeen: now}

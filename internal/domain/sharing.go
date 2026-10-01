@@ -234,5 +234,9 @@ func (s SharingState) MatchesBot(id BotIdentity) bool {
 	return id.ID > 0 && (s.BotID == 0 || s.BotID == id.ID)
 }
 
+// ErrRegistrationBusy refuses a new contact because first contacts arrive
+// faster than the per-minute cap; like capacity it never blocks polling.
+var ErrRegistrationBusy = errors.New("new private contacts arrive too fast")
+
 // ErrRecipientCapacity rejects a new contact without blocking owner polling.
 var ErrRecipientCapacity = errors.New("private recipient capacity reached")

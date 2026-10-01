@@ -136,7 +136,8 @@ func (g *Gateway) admitPrivate(ctx context.Context, u *models.Update) error {
 		g.private.first[u.ID] = true
 		g.private.mu.Unlock()
 	}
-	if errors.Is(err, domain.ErrRecipientCapacity) {
+	if errors.Is(err, domain.ErrRecipientCapacity) || errors.Is(err, domain.ErrRegistrationBusy) {
+		// Refused, not failed: acknowledge the update and keep polling.
 		return nil
 	}
 	return err

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/permgps/herdr-telegram-agents/internal/app"
+	"github.com/permgps/herdr-telegram-agents/internal/domain"
 	"github.com/permgps/herdr-telegram-agents/internal/testkit"
 )
 
@@ -58,5 +59,34 @@ func TestSharingCorruptionDisablesGuests(t *testing.T) {
 	}
 	if _, err := s.Register(context.Background(), 7, 7, "name", "", time.Unix(1000, 0)); !errors.Is(err, app.ErrSharingUnavailable) {
 		t.Fatal(err)
+	}
+}
+
+// TestSharingRegistrationRate: each first contact is a durable write on the
+// polling path. A flood of new accounts is capped per minute; the excess is
+// refused (not registered, not written) and polling goes on.
+func TestSharingRegistrationRate(t *testing.T) {
+	ctx := context.Background()
+	store := testkit.NewMemSharingStore()
+	s := app.NewSharing(ctx, store, nil)
+	now := time.Unix(1000, 0)
+	for id := int64(1); id <= app.MaxNewContactsPerMinute; id++ {
+		if _, err := s.Register(ctx, id, id, "n", "", now); err != nil {
+			t.Fatalf("contact %d: %v", id, err)
+		}
+	}
+	saved, _ := store.Load(ctx)
+	if _, err := s.Register(ctx, 999, 999, "n", "", now); !errors.Is(err, domain.ErrRegistrationBusy) {
+		t.Fatalf("contact over the rate = %v", err)
+	}
+	if after, _ := store.Load(ctx); after.Revision != saved.Revision {
+		t.Fatal("refused contact was written")
+	}
+	// Known contacts are never refused.
+	if _, err := s.Register(ctx, 1, 1, "again", "", now); err != nil {
+		t.Fatalf("known contact refused: %v", err)
+	}
+	if _, err := s.Register(ctx, 999, 999, "n", "", now.Add(time.Minute)); err != nil {
+		t.Fatalf("rate did not recover: %v", err)
 	}
 }
