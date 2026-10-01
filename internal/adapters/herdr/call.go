@@ -54,6 +54,30 @@ func call(ctx context.Context, dial dialFunc, path string, log *slog.Logger, met
 	return err
 }
 
+// maxReplyLine caps one reply line, the same bound as the event stream's
+// scanner; a variable so tests can lower it.
+var maxReplyLine = 16 << 20
+
+// errReplyTooLong means a reply line went past maxReplyLine.
+var errReplyTooLong = errors.New("herdr reply line exceeds the size cap")
+
+// readLine reads one '\n'-terminated line of at most max bytes without
+// buffering more than that.
+func readLine(rd *bufio.Reader, max int) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := rd.ReadSlice('\n')
+		if len(line)+len(chunk) > max {
+			return nil, fmt.Errorf("%w (%d bytes)", errReplyTooLong, max)
+		}
+		line = append(line, chunk...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		return line, err
+	}
+}
+
 func callOnce(ctx context.Context, dial dialFunc, path, id, method string, params, out any) error {
 	line, err := json.Marshal(request{ID: id, Method: method, Params: params})
 	if err != nil {
@@ -81,7 +105,10 @@ func callOnce(ctx context.Context, dial dialFunc, path, id, method string, param
 	}
 	rd := bufio.NewReaderSize(conn, 64<<10)
 	for {
-		raw, err := rd.ReadBytes('\n')
+		raw, err := readLine(rd, maxReplyLine)
+		if errors.Is(err, errReplyTooLong) {
+			return fmt.Errorf("herdr read %s: %w", method, err)
+		}
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				err = fmt.Errorf("%w: server closed before replying to %s", domain.ErrDisconnected, method)
