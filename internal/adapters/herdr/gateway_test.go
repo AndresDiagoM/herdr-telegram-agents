@@ -29,6 +29,16 @@ func notDrivenHandler(id string, params json.RawMessage) (any, *testkit.APIError
 	return nil, &testkit.APIError{Code: codeNotDriven, Message: "agent w1:p1 is not an active named agent"}
 }
 
+// listedAs answers agent.list with one self-reported agent in w1:p1, the
+// way Herdr lists Crush, in the given status.
+func listedAs(status string) testkit.HandlerFunc {
+	return func(id string, params json.RawMessage) (any, *testkit.APIError) {
+		return map[string]any{"type": "agent_list", "agents": []any{
+			map[string]any{"pane_id": "w1:p1", "workspace_id": "w1", "tab_id": "w1:t1", "agent": "crush", "agent_status": status},
+		}}, nil
+	}
+}
+
 func newGateway(t *testing.T, s *testkit.NDJSONServer) *Gateway {
 	t.Helper()
 	s.Handle("ping", pingHandler)
@@ -310,6 +320,7 @@ func TestGatewayPromptAndSendKeys(t *testing.T) {
 func TestGatewayPromptFallsBackToPaneInput(t *testing.T) {
 	s := testkit.NewNDJSONServer(t, nil)
 	s.Handle("agent.prompt", notDrivenHandler)
+	s.Handle("agent.list", listedAs("idle"))
 	s.Handle("pane.send_text", ackHandler)
 	s.Handle("pane.send_keys", ackHandler)
 	g := newGateway(t, s)
@@ -332,11 +343,12 @@ func TestGatewayPromptFallsBackToPaneInput(t *testing.T) {
 func TestGatewayPromptFallbackFoldsLineBreaks(t *testing.T) {
 	s := testkit.NewNDJSONServer(t, nil)
 	s.Handle("agent.prompt", notDrivenHandler)
+	s.Handle("agent.list", listedAs("idle"))
 	s.Handle("pane.send_text", ackHandler)
 	s.Handle("pane.send_keys", ackHandler)
 	g := newGateway(t, s)
 
-	if err := g.Prompt(ctxT(t), "w1:p1", "first line\nsecond line\r\nthird"); err != nil {
+	if err := g.Prompt(ctxT(t), "w1:p1", "first line\n\n  second line \r\nthird\n"); err != nil {
 		t.Fatalf("Prompt: %v", err)
 	}
 	want := map[string]any{"pane_id": "w1:p1", "text": "first line second line third"}
@@ -394,6 +406,122 @@ func TestGatewayPromptKeepsRefusalForAgentName(t *testing.T) {
 	}
 	if reqs := s.WaitRequests("pane.send_text", 1, 200*time.Millisecond); len(reqs) != 0 {
 		t.Fatalf("pane.send_text should stay unused for an agent name, got %d requests", len(reqs))
+	}
+}
+
+// A blocked Crush shows a permission dialog whose enter confirms the
+// highlighted option, and Herdr cannot answer agent_blocked for an agent it
+// does not drive. The gateway must report the dialog itself and type
+// nothing, so the application refuses as it does for a driven agent.
+func TestGatewayPromptRefusesBlockedNotDriven(t *testing.T) {
+	s := testkit.NewNDJSONServer(t, nil)
+	s.Handle("agent.prompt", notDrivenHandler)
+	s.Handle("agent.list", listedAs("blocked"))
+	s.Handle("pane.send_text", ackHandler)
+	s.Handle("pane.send_keys", ackHandler)
+	g := newGateway(t, s)
+
+	err := g.Prompt(ctxT(t), "w1:p1", "stop, do not delete that")
+	if !errors.Is(err, domain.ErrAgentBlocked) {
+		t.Fatalf("Prompt error = %v, want ErrAgentBlocked", err)
+	}
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != codeNotDriven {
+		t.Fatalf("Prompt error = %v, want the %s refusal kept inside", err, codeNotDriven)
+	}
+	assertNothingTyped(t, s)
+}
+
+// Whenever the gateway cannot tell that the agent is out of a dialog, the
+// refusal stays as Herdr sent it and nothing reaches the pane.
+func TestGatewayPromptKeepsRefusalWhenInDoubt(t *testing.T) {
+	failing := func(id string, params json.RawMessage) (any, *testkit.APIError) {
+		return nil, &testkit.APIError{Code: "internal", Message: "boom"}
+	}
+	notListed := func(id string, params json.RawMessage) (any, *testkit.APIError) {
+		return map[string]any{"type": "agent_list", "agents": []any{
+			map[string]any{"pane_id": "w1:p2", "workspace_id": "w1", "tab_id": "w1:t1", "agent": "crush", "agent_status": "idle"},
+		}}, nil
+	}
+	for _, tc := range []struct {
+		name string
+		list testkit.HandlerFunc
+		text string
+	}{
+		{"unknown status", listedAs("unknown"), "fix the tests"},
+		{"status Herdr may add later", listedAs("thinking"), "fix the tests"},
+		{"pane not listed", notListed, "fix the tests"},
+		{"lookup failed", failing, "fix the tests"},
+		{"empty text", listedAs("idle"), ""},
+		{"only line breaks", listedAs("idle"), "\n  \r\n "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testkit.NewNDJSONServer(t, nil)
+			s.Handle("agent.prompt", notDrivenHandler)
+			s.Handle("agent.list", tc.list)
+			s.Handle("pane.send_text", ackHandler)
+			s.Handle("pane.send_keys", ackHandler)
+			g := newGateway(t, s)
+
+			err := g.Prompt(ctxT(t), "w1:p1", tc.text)
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.Code != codeNotDriven {
+				t.Fatalf("Prompt error = %v, want %s", err, codeNotDriven)
+			}
+			if errors.Is(err, domain.ErrAgentBlocked) {
+				t.Fatalf("Prompt error = %v, must not claim a dialog", err)
+			}
+			assertNothingTyped(t, s)
+		})
+	}
+}
+
+// A working Crush takes the prompt the way a driven agent would.
+func TestGatewayPromptTypesIntoWorkingNotDriven(t *testing.T) {
+	for _, status := range []string{"working", "done"} {
+		t.Run(status, func(t *testing.T) {
+			s := testkit.NewNDJSONServer(t, nil)
+			s.Handle("agent.prompt", notDrivenHandler)
+			s.Handle("agent.list", listedAs(status))
+			s.Handle("pane.send_text", ackHandler)
+			s.Handle("pane.send_keys", ackHandler)
+			g := newGateway(t, s)
+
+			if err := g.Prompt(ctxT(t), "w1:p1", "next step"); err != nil {
+				t.Fatalf("Prompt: %v", err)
+			}
+			want := map[string]any{"pane_id": "w1:p1", "text": "next step"}
+			if got := lastParams(t, s, "pane.send_text"); !reflect.DeepEqual(got, want) {
+				t.Fatalf("pane.send_text params = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// Keys are an explicit choice (the buttons, /keys, /stop), so a blocked
+// Crush still gets them: that is how its dialog is answered.
+func TestGatewaySendKeysReachesBlockedNotDriven(t *testing.T) {
+	s := testkit.NewNDJSONServer(t, nil)
+	s.Handle("agent.send_keys", notDrivenHandler)
+	s.Handle("agent.list", listedAs("blocked"))
+	s.Handle("pane.send_keys", ackHandler)
+	g := newGateway(t, s)
+
+	if err := g.SendKeys(ctxT(t), "w1:p1", []string{"3"}); err != nil {
+		t.Fatalf("SendKeys: %v", err)
+	}
+	want := map[string]any{"pane_id": "w1:p1", "keys": []any{"3"}}
+	if got := lastParams(t, s, "pane.send_keys"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("pane.send_keys params = %v, want %v", got, want)
+	}
+}
+
+func assertNothingTyped(t *testing.T, s *testkit.NDJSONServer) {
+	t.Helper()
+	for _, m := range []string{"pane.send_text", "pane.send_keys"} {
+		if reqs := s.WaitRequests(m, 1, 200*time.Millisecond); len(reqs) != 0 {
+			t.Fatalf("%s should stay unused, got %d requests", m, len(reqs))
+		}
 	}
 }
 

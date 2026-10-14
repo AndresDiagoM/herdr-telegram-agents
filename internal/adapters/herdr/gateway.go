@@ -238,26 +238,75 @@ func (g *Gateway) ReadScreen(ctx context.Context, target string, source domain.S
 // Herdr refuses agent.prompt for an agent it does not drive itself — one
 // that only reports its own state, such as Crush — with agent_not_ready
 // ("agent w1:p1 is not an active named agent", 0.9.3). The refusal comes
-// before any input reaches the pane, so the text still goes in: literally
-// through pane.send_text, then Enter through pane.send_keys, which is what
-// the agent would have received. The line breaks go with it, since raw
-// typing has no submission of its own and an Enter inside the text would
-// send the message in pieces.
+// before any input reaches the pane, so the text can still go in: as one
+// line (domain.DialogText) through pane.send_text, then Enter through
+// pane.send_keys. Raw typing has no submission of its own, so an Enter
+// inside the text would send the message in pieces.
 //
-// Every other refusal keeps its meaning: agent_blocked still reaches the
-// caller, which types into the dialog's own entry instead.
+// Herdr cannot refuse such an agent with agent_blocked, and the same code
+// also answers an agent still blocked during startup, so the pane is typed
+// into only while the status the agent reports is idle, working or done. A
+// reported blocked agent returns ErrAgentBlocked like a driven one, so the
+// text never lands in a dialog whose Enter confirms the highlighted option.
+// Any doubt (unknown status, pane not listed, failed lookup, nothing to
+// type) keeps the original refusal.
 func (g *Gateway) Prompt(ctx context.Context, target, text string) error {
 	err := g.call(ctx, "agent.prompt", target, promptParams{Target: target, Text: text}, nil)
 	if !isNotDriven(err, target) {
 		return err
 	}
-	g.log.Info("herdr does not drive this agent, typing into the pane",
-		slog.String("target", target), slog.Int("text_len", len(text)))
-	flat := lineBreak.Replace(text)
-	if err := g.call(ctx, "pane.send_text", target, sendTextParams{PaneID: target, Text: flat}, nil); err != nil {
+	g.log.Debug("herdr does not drive this agent, checking its status", slog.String("target", target))
+	status, listed, lookupErr := g.paneStatus(ctx, target)
+	if lookupErr != nil {
+		g.log.Warn("herdr agent status lookup failed, not typing",
+			slog.String("target", target), slog.String("err", lookupErr.Error()))
 		return err
 	}
-	return g.call(ctx, "pane.send_keys", target, paneSendKeysParams{PaneID: target, Keys: []string{"enter"}}, nil)
+	if !listed {
+		g.log.Info("herdr does not drive this agent, not typing",
+			slog.String("target", target), slog.String("reason", "not_listed"))
+		return err
+	}
+	switch status {
+	case domain.StatusBlocked:
+		g.log.Info("herdr does not drive this agent and it is blocked, not typing", slog.String("target", target))
+		var apiErr *APIError
+		errors.As(err, &apiErr)
+		return fmt.Errorf("herdr agent.prompt: %w: %w", domain.ErrAgentBlocked, apiErr)
+	case domain.StatusIdle, domain.StatusWorking, domain.StatusDone:
+	default:
+		g.log.Info("herdr does not drive this agent, not typing",
+			slog.String("target", target), slog.String("reason", "unknown_status"), slog.String("status", string(status)))
+		return err
+	}
+	line, lines := domain.DialogText(text)
+	if line == "" {
+		g.log.Info("herdr does not drive this agent, not typing",
+			slog.String("target", target), slog.String("reason", "empty_text"))
+		return err
+	}
+	g.log.Info("herdr does not drive this agent, typing into the pane",
+		slog.String("target", target), slog.String("status", string(status)),
+		slog.Int("text_len", len(line)), slog.Int("lines", lines))
+	if err := g.call(ctx, "pane.send_text", target, sendTextParams{PaneID: target, Text: line}, nil); err != nil {
+		return err
+	}
+	return g.call(ctx, "pane.send_keys", target, paneSendKeysParams{PaneID: target, Keys: []string{domain.KeyEnter}}, nil)
+}
+
+// paneStatus returns the status the agent in paneID reports through
+// agent.list; listed is false when Herdr lists no agent there.
+func (g *Gateway) paneStatus(ctx context.Context, paneID string) (status domain.Status, listed bool, err error) {
+	var res agentListResult
+	if err := g.call(ctx, "agent.list", "", nil, &res); err != nil {
+		return "", false, err
+	}
+	for _, a := range res.Agents {
+		if a.PaneID == paneID {
+			return domain.ParseStatus(a.AgentStatus), true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // SendKeys sends raw key names to the agent's terminal, falling back to the
@@ -285,10 +334,6 @@ func isNotDriven(err error, target string) bool {
 	var apiErr *APIError
 	return errors.As(err, &apiErr) && apiErr.Code == codeNotDriven
 }
-
-// lineBreak folds a message onto one line, for input that is typed rather
-// than submitted.
-var lineBreak = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
 
 // SendText types literal text into the pane through pane.send_text; it
 // presses no enter. The text itself is never logged, only its length.
