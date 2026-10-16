@@ -163,7 +163,7 @@ func pathWithout(t *testing.T) string {
 
 func TestInstallScriptSignature(t *testing.T) {
 	if testing.Short() {
-		t.Skip("runs install.sh eight times")
+		t.Skip("runs install.sh against release fixtures")
 	}
 	for _, tc := range []struct {
 		name      string
@@ -179,10 +179,14 @@ func TestInstallScriptSignature(t *testing.T) {
 			_, other, _ := ed25519.GenerateKey(rand.Reader)
 			r.files["release.txt.sig"] = testkit.SignSSH(other, "herdr-tg-release", r.files["release.txt"])
 		}, fails: "release signature does not verify"},
+		{name: "bad signature with approved checksum", edit: func(f *installFixture, r *installRelease) {
+			_, other, _ := ed25519.GenerateKey(rand.Reader)
+			r.files["release.txt.sig"] = testkit.SignSSH(other, "herdr-tg-release", r.files["release.txt"])
+		}, approved: (*installFixture).digest, fails: "release signature does not verify"},
 		{name: "unsigned", edit: func(_ *installFixture, r *installRelease) {
 			delete(r.files, "release.txt")
 			delete(r.files, "release.txt.sig")
-		}, signature: "absent"},
+		}, fails: "requires a verified signature or an approved checksum"},
 		{name: "unsigned with approved checksum", edit: func(_ *installFixture, r *installRelease) {
 			delete(r.files, "release.txt.sig")
 		}, approved: (*installFixture).digest, signature: "absent", ran: true},
@@ -197,7 +201,8 @@ func TestInstallScriptSignature(t *testing.T) {
 			r.files["release.txt"] = []byte(statement)
 			r.files["release.txt.sig"] = testkit.SignSSH(f.priv, "herdr-tg-release", []byte(statement))
 		}, fails: "is not for v9.9.9"},
-		{name: "no ssh-keygen", noKeygen: true, signature: "unverifiable"},
+		{name: "no ssh-keygen", noKeygen: true, fails: "requires a verified signature or an approved checksum"},
+		{name: "no ssh-keygen with approved checksum", noKeygen: true, approved: (*installFixture).digest, signature: "unverifiable", ran: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -234,5 +239,30 @@ func TestInstallScriptSignature(t *testing.T) {
 				t.Fatalf("binary ran = %t, want %t\n%s", ran, tc.ran, out)
 			}
 		})
+	}
+}
+
+func TestInstallScriptUntrustedReleasePreservesInstallation(t *testing.T) {
+	f := newInstallFixture(t)
+	if err := os.Mkdir(filepath.Join(f.root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"herdr-tg", "install-receipt"} {
+		write(t, filepath.Join(f.root, "bin", name), "previous "+name)
+	}
+	rel := f.release()
+	delete(rel.files, "release.txt.sig")
+	if out, err := f.run(t, rel, "", ""); err == nil {
+		t.Fatalf("untrusted release accepted: %s", out)
+	}
+	for _, name := range []string{"herdr-tg", "install-receipt"} {
+		got, err := os.ReadFile(filepath.Join(f.root, "bin", name))
+		if err != nil || string(got) != "previous "+name {
+			t.Fatalf("previous %s changed: %q, %v", name, got, err)
+		}
+	}
+	entries, err := os.ReadDir(filepath.Join(f.root, "bin"))
+	if err != nil || len(entries) != 2 {
+		t.Fatalf("temporary install files left behind: %v, %v", entries, err)
 	}
 }

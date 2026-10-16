@@ -61,7 +61,7 @@ func TestSpawnStopAndKill(t *testing.T) {
 		return string(b) == "spawned\n"
 	}, "child output in err log")
 
-	if err := p.Resync(pid); err != nil {
+	if err := p.Resync(pid, true); err != nil {
 		// sh ignores nothing by default: SIGHUP ends it, which is fine here.
 		t.Fatalf("Resync = %v", err)
 	}
@@ -73,11 +73,11 @@ func TestSpawnStopAndKill(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = p.Kill(pid) })
 	waitUntil(t, func() bool { return p.Alive(pid) }, "second child alive")
-	if err := p.Stop(pid); err != nil {
+	if err := p.Stop(pid, true); err != nil {
 		t.Fatalf("Stop = %v", err)
 	}
 	waitUntil(t, func() bool { return !p.Alive(pid) }, "child gone after SIGTERM")
-	if err := p.Stop(pid); !errors.Is(err, domain.ErrNotRunning) {
+	if err := p.Stop(pid, true); !errors.Is(err, domain.ErrNotRunning) {
 		t.Fatalf("Stop on dead pid = %v, want ErrNotRunning", err)
 	}
 }
@@ -145,11 +145,13 @@ func TestStopPrefersControlChannel(t *testing.T) {
 	t.Cleanup(func() { _ = p.Kill(pid) })
 	waitUntil(t, func() bool { return p.Alive(pid) }, "child alive")
 
-	if err := p.Stop(pid); err != nil {
-		t.Fatalf("Stop = %v", err)
-	}
-	if err := p.Resync(pid); err != nil {
-		t.Fatalf("Resync = %v", err)
+	for _, verified := range []bool{false, true} {
+		if err := p.Stop(pid, verified); err != nil {
+			t.Fatalf("Stop = %v", err)
+		}
+		if err := p.Resync(pid, verified); err != nil {
+			t.Fatalf("Resync = %v", err)
+		}
 	}
 	line, err := p.Status(context.Background())
 	if err != nil || line != "version=test pid=1 uptime=0s agents=0 dropped=0 herdr=ok" {
@@ -158,13 +160,25 @@ func TestStopPrefersControlChannel(t *testing.T) {
 	mu.Lock()
 	gotStops, gotResyncs := stops, resyncs
 	mu.Unlock()
-	if gotStops != 1 || gotResyncs != 1 {
+	if gotStops != 2 || gotResyncs != 2 {
 		t.Fatalf("handlers called stop=%d resync=%d", gotStops, gotResyncs)
 	}
 	// The control channel answered, so no signal reached the child.
 	time.Sleep(50 * time.Millisecond)
 	if !p.Alive(pid) {
 		t.Fatal("child was signalled although the control channel answered")
+	}
+	// Losing a previously responsive channel must not authorize a signal.
+	cancel()
+	<-served
+	if err := p.Resync(pid, false); !errors.Is(err, domain.ErrControlUnavailable) {
+		t.Fatalf("unverified Resync without control = %v", err)
+	}
+	if err := p.Stop(pid, false); !errors.Is(err, domain.ErrControlUnavailable) {
+		t.Fatalf("unverified Stop without control = %v", err)
+	}
+	if !p.Alive(pid) {
+		t.Fatal("unverified child was signalled after control channel disappeared")
 	}
 }
 

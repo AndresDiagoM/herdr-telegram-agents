@@ -139,19 +139,19 @@ func TestFakeProcessLifecycle(t *testing.T) {
 	if err := p.Acquire(42); !errors.Is(err, domain.ErrAlreadyRunning) {
 		t.Fatalf("Acquire while held = %v", err)
 	}
-	if err := p.Stop(pid); err != nil || p.Alive(pid) || p.Held() != 0 {
+	if err := p.Stop(pid, true); err != nil || p.Alive(pid) || p.Held() != 0 {
 		t.Fatalf("Stop: err=%v %s", err, p)
 	}
 	p.IgnoreStop(true)
 	pid, _ = p.Spawn(context.Background(), nil)
-	if err := p.Stop(pid); err != nil || !p.Alive(pid) {
+	if err := p.Stop(pid, true); err != nil || !p.Alive(pid) {
 		t.Fatalf("Stop with IgnoreStop: err=%v alive=%v", err, p.Alive(pid))
 	}
 	if err := p.Kill(pid); err != nil || p.Alive(pid) {
 		t.Fatalf("Kill: err=%v alive=%v", err, p.Alive(pid))
 	}
 	p.SetUnsupported(true)
-	if err := p.Resync(pid); !errors.Is(err, domain.ErrUnsupportedPlatform) {
+	if err := p.Resync(pid, true); !errors.Is(err, domain.ErrUnsupportedPlatform) {
 		t.Fatalf("Resync unsupported = %v", err)
 	}
 }

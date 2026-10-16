@@ -28,8 +28,9 @@ herdr plugin install permgps/herdr-telegram-agents
 
 Herdr downloads a signed, checksum-verified release binary. The install
 script checks the signature with `ssh-keygen` (OpenSSH 8.1 or newer, present
-on macOS, most Linux distributions and Windows 10+). Without it the script
-warns and trusts the release checksums alone. Published targets are
+on macOS, most Linux distributions and Windows 10+). Without a verified
+signature, installation requires a trusted checksum supplied by the updater;
+otherwise it stops before replacing the binary. Published targets are
 macOS and Linux on amd64 and arm64, and Windows on amd64. The plugin needs no
 Go toolchain on the machine where it is installed.
 
@@ -114,7 +115,7 @@ There are no scheduled checks or unattended installations.
 
 Only releases signed by the maintainer's key are offered. An unsigned one
 shows "not signed yet". A managed GitHub installation is reinstalled at the
-exact release tag and must resolve to the signed commit. A clean locally
+exact signed commit before any build script runs. A clean locally
 linked checkout on `main` fast-forwards to the release commit and runs the
 checksum-verified installer. An intentionally pinned managed
 installation, a dirty or detached local checkout, or a source from another

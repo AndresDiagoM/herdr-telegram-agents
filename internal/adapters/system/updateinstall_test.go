@@ -80,14 +80,14 @@ func TestUpdateInstallerManagedExactRefsAndWindowsCommand(t *testing.T) {
 		commands = append(commands, bin+" "+strings.Join(args, " "))
 		return nil
 	}}
-	managed := domain.UpdateJob{SourceKind: "github", TargetTag: "v1.2.0", OldCommit: "abc123"}
+	managed := domain.UpdateJob{SourceKind: "github", TargetTag: "v1.2.0", TargetCommit: strings.Repeat("a", 40), OldCommit: "abc123"}
 	if err := i.Install(context.Background(), managed); err != nil {
 		t.Fatal(err)
 	}
 	if err := i.Rollback(context.Background(), managed); err != nil {
 		t.Fatal(err)
 	}
-	if commands[0] != "herdr plugin install permgps/herdr-telegram-agents --ref v1.2.0 --yes" || commands[1] != "herdr plugin install permgps/herdr-telegram-agents --ref abc123 --yes" {
+	if commands[0] != "herdr plugin install permgps/herdr-telegram-agents --ref "+managed.TargetCommit+" --yes" || commands[1] != "herdr plugin install permgps/herdr-telegram-agents --ref abc123 --yes" {
 		t.Fatalf("commands=%v", commands)
 	}
 	i.StateDir = t.TempDir()
@@ -110,6 +110,20 @@ func TestUpdateInstallerManagedExactRefsAndWindowsCommand(t *testing.T) {
 	}
 	if !strings.HasPrefix(commands[len(commands)-1], "powershell -NoProfile ") {
 		t.Fatalf("windows command=%v", commands)
+	}
+}
+
+func TestUpdateInstallerRejectsInvalidManagedCommit(t *testing.T) {
+	for _, commit := range []string{"", "main", "abc123", strings.Repeat("g", 40), strings.Repeat("A", 40), "--help"} {
+		t.Run(commit, func(t *testing.T) {
+			i := &UpdateInstaller{RunCommand: func(context.Context, string, []string, string, ...string) error {
+				t.Fatal("invalid commit reached command execution")
+				return nil
+			}}
+			if err := i.Install(context.Background(), domain.UpdateJob{SourceKind: "github", TargetTag: "v1.2.0", TargetCommit: commit}); err == nil {
+				t.Fatal("invalid commit accepted")
+			}
+		})
 	}
 }
 
@@ -147,7 +161,7 @@ func TestUpdateInstallerPassesApprovedChecksum(t *testing.T) {
 			seen = append(seen, strings.Join(env, " "))
 			return nil
 		}}
-		job := domain.UpdateJob{SourceKind: source, TargetTag: "v1.2.0", TargetCommit: "new", TargetChecksum: sum, OldCommit: "old", OldBinaryBackup: "backup", SourceRoot: t.TempDir()}
+		job := domain.UpdateJob{SourceKind: source, TargetTag: "v1.2.0", TargetCommit: strings.Repeat("a", 40), TargetChecksum: sum, OldCommit: "old", OldBinaryBackup: "backup", SourceRoot: t.TempDir()}
 		if err := i.Install(context.Background(), job); err != nil {
 			t.Fatal(err)
 		}

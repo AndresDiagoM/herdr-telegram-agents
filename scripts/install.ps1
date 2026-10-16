@@ -9,9 +9,8 @@
 # Signed releases also carry release.txt and release.txt.sig (SSHSIG by a key
 # in scripts\signing\allowed_signers). When ssh-keygen can verify SSHSIG
 # (proven by the self-test fixture in scripts\signing\), a bad signature
-# refuses the install; otherwise the script warns and trusts checksums.txt.
-# The binary runs (`herdr-tg version`) only after a verified signature or a
-# matching approved checksum. bin\install-receipt records sha256, approved
+# refuses the install. The binary is installed and run only after a verified
+# signature or a matching approved checksum. bin\install-receipt records sha256, approved
 # and signature for the plugin's updater. Mirrors scripts/install.sh.
 $ErrorActionPreference = "Stop"
 
@@ -156,11 +155,16 @@ try {
             Write-Host "install: release signature ok"
         } else {
             $signature = "unverifiable"
-            Write-Warning "install: cannot check the release signature (needs OpenSSH 8.1 or newer); trusting checksums.txt"
+            Write-Warning "install: cannot check the release signature (needs OpenSSH 8.1 or newer)"
         }
     } else {
-        Write-Warning "install: release v$version is not signed; trusting checksums.txt"
+        Write-Warning "install: release v$version is not signed"
     }
+
+    if ($signature -ne "verified" -and -not $approved) {
+        throw "install: [FIX] installation requires a verified signature or an approved checksum"
+    }
+    Write-Host "install: [FIX] release trust verified (signature=$signature, approved=$([bool]$approved))"
 
     $approvedText = if ($approved) { $approved } else { "none" }
     $receiptPath = Join-Path (Get-Location).ProviderPath $receipt
@@ -174,8 +178,4 @@ try {
     }
 }
 
-if ($signature -eq "verified" -or $approved) {
-    & ".\bin\herdr-tg.exe" version
-} else {
-    Write-Host "install: skipped running an unverified binary"
-}
+& ".\bin\herdr-tg.exe" version

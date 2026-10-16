@@ -12,11 +12,10 @@
 # Signed releases also carry release.txt (tag, commit, the checksums lines)
 # and release.txt.sig, an SSHSIG by a key in scripts/signing/allowed_signers.
 # When ssh-keygen can verify SSHSIG (OpenSSH 8.1+, proven by the self-test
-# fixture in scripts/signing/), a bad signature refuses the install; without
-# such an ssh-keygen, or for an unsigned release, the script warns and trusts
-# checksums.txt as before. The binary is run (`herdr-tg version`) only when it
-# is bound to something trusted: a verified signature or the approved
-# checksum. bin/install-receipt records sha256, approved and signature for
+# fixture in scripts/signing/), a bad signature refuses the install. The
+# binary is installed and run only when it is bound to something trusted:
+# a verified signature or the approved checksum. bin/install-receipt records
+# sha256, approved and signature for
 # the plugin's updater.
 set -eu
 
@@ -159,11 +158,17 @@ if fetch_optional "${base}/release.txt" "$stmt" && fetch_optional "${base}/relea
 		echo "install: release signature ok"
 	else
 		signature=unverifiable
-		echo "install: cannot check the release signature (needs OpenSSH 8.1 or newer); trusting checksums.txt" >&2
+		echo "install: cannot check the release signature (needs OpenSSH 8.1 or newer)" >&2
 	fi
 else
-	echo "install: release v${version} is not signed; trusting checksums.txt" >&2
+	echo "install: release v${version} is not signed" >&2
 fi
+
+if [ "$signature" != verified ] && [ -z "$approved" ]; then
+	echo "install: [FIX] installation requires a verified signature or an approved checksum" >&2
+	exit 1
+fi
+echo "install: [FIX] release trust verified (signature=${signature}, approved=${approved:+present})"
 
 printf 'sha256 %s\napproved %s\nsignature %s\n' "$actual" "${approved:-none}" "$signature" >"$receipt"
 mv "$tmp" bin/herdr-tg
@@ -173,8 +178,4 @@ rm -f "$sums" "$stmt" "$sig"
 trap - EXIT
 
 echo "install: installed bin/herdr-tg"
-if [ "$signature" = verified ] || [ -n "$approved" ]; then
-	./bin/herdr-tg version
-else
-	echo "install: skipped running an unverified binary"
-fi
+./bin/herdr-tg version

@@ -84,7 +84,9 @@ func (p *UpdatePreflight) Check(ctx context.Context, release domain.Release) (Up
 			owned := false
 			if p.History != nil {
 				if previous, err := p.History.Load(ctx); err == nil {
-					owned = previous.Phase == "succeeded" && previous.TargetTag == install.RequestedRef && previous.NewCommit == install.ResolvedCommit
+					ownRef := previous.TargetTag == install.RequestedRef ||
+						(previous.TargetCommit == install.RequestedRef && previous.TargetCommit == previous.NewCommit)
+					owned = previous.Phase == "succeeded" && ownRef && previous.NewCommit == install.ResolvedCommit
 				}
 			}
 			if !owned {

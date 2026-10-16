@@ -23,11 +23,15 @@ func (p *Process) Alive(pid int) bool {
 
 // Stop asks the daemon through its control channel and falls back to
 // SIGTERM, which is all a daemon from an older build understands.
-func (p *Process) Stop(pid int) error {
+func (p *Process) Stop(pid int, verified bool) error {
 	if _, err := p.control(ControlStop); err == nil {
 		return nil
 	} else if !errors.Is(err, domain.ErrControlUnavailable) {
 		return err
+	}
+	if !verified {
+		p.log.Warn("[FIX] refusing SIGTERM to unverified pid", slog.Int("pid", pid))
+		return domain.ErrControlUnavailable
 	}
 	p.log.Debug("control unavailable, sending SIGTERM", slog.Int("pid", pid))
 	return p.signal(pid, syscall.SIGTERM, "stop")
@@ -35,11 +39,15 @@ func (p *Process) Stop(pid int) error {
 
 // Resync asks the daemon through its control channel and falls back to
 // SIGHUP; see Stop.
-func (p *Process) Resync(pid int) error {
+func (p *Process) Resync(pid int, verified bool) error {
 	if _, err := p.control(ControlResync); err == nil {
 		return nil
 	} else if !errors.Is(err, domain.ErrControlUnavailable) {
 		return err
+	}
+	if !verified {
+		p.log.Warn("[FIX] refusing SIGHUP to unverified pid", slog.Int("pid", pid))
+		return domain.ErrControlUnavailable
 	}
 	p.log.Debug("control unavailable, sending SIGHUP", slog.Int("pid", pid))
 	return p.signal(pid, syscall.SIGHUP, "resync")

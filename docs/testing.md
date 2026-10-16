@@ -42,16 +42,17 @@ public network. Signed releases are covered in two places:
   signatures.
 - `TestInstallScriptSignature` runs `scripts/install.sh` against an
   `httptest` release on Linux and macOS. It covers a signed release, a bad
-  signature, an unsigned release, an approved checksum without a signature,
+  signature, rejection of an unsigned release, an approved checksum without a signature,
   an approved mismatch, a signed digest that disagrees with `checksums.txt`,
-  a statement for another tag and a host without `ssh-keygen`.
+  a statement for another tag and a host without `ssh-keygen` (rejected
+  unless a matching approved checksum is provided).
 
 Before releasing this feature, run the automated gates and these isolated
 integration cases against a mock GitHub release and disposable Herdr data:
 
 - [ ] No newer release: show the installed version, with no Update button or daemon mutation.
 - [ ] Stable and prerelease candidates: choose the highest valid published version, never a downgrade.
-- [ ] Managed source: install the exact tag and confirm the new manifest, binary, daemon pid, `version=…`, `herdr=ok`, and `telegram=ready`.
+- [ ] Managed source: install the signed commit, confirm `requested_ref` and `resolved_commit` equal that commit, and check the new manifest, binary, daemon pid, `version=…`, `herdr=ok`, and `telegram=ready`. A subsequent update remains eligible.
 - [ ] Clean linked `main`: fast-forward to the release commit, verify the binary checksum, and retain the local link.
 - [ ] Dirty, detached, pinned, or wrong-repository source: show a reason without an Update button.
 - [ ] Rate limit, broken pagination, missing asset, bad checksum, or incompatible Herdr: show failure or blocker without installation.
@@ -61,7 +62,7 @@ integration cases against a mock GitHub release and disposable Herdr data:
 - [ ] Windows fixture: hold the old `.exe` open, verify stop-before-replace and guarded rollback, then confirm the new daemon version and poller readiness.
 - [ ] Signed release, managed source: after the update, `daemon.log` has an `install receipt` line with `signature=verified`. Record whether `approved_present` was true, which shows whether Herdr passes `HERDR_TG_EXPECTED_SHA256` to `[[build]]`, and note the Herdr version.
 - [ ] Unsigned target (tag pushed, `make sign-release` not run yet): the panel shows `This release is not signed yet` without an Update button; after signing, **Check again** offers `· signed` and Update.
-- [ ] Windows install of a signed release: `bin\install-receipt` says `signature verified`; record `ssh-keygen` version (`ssh -V`). On a host without OpenSSH it says `signature unverifiable` and the install still succeeds.
+- [ ] Windows install of a signed release: `bin\install-receipt` says `signature verified`; record `ssh-keygen` version (`ssh -V`). Without OpenSSH, installation fails and preserves the previous binary unless a matching trusted `HERDR_TG_EXPECTED_SHA256` is supplied; with that checksum it succeeds with `signature unverifiable`.
 
 The existing Windows checklist below describes earlier plugin behavior. It
 does not verify the new update worker until the Windows fixture above passes.
@@ -118,7 +119,9 @@ outside the containers and that temporary directory is touched.
 `HERDR_TG_BASE_URL` must be `https://`; a local snapshot served over http
 also needs `HERDR_TG_ALLOW_INSECURE_BASE=1`, which the script passes through.
 Each run must end with `signature verified` in `bin/install-receipt` unless
-`--allow-unsigned` is given (releases before signing started).
+`--allow-unsigned` is given (releases before signing started). This option
+only relaxes the verification helper's receipt check; current installers
+still require a verified signature or a separately trusted approved checksum.
 
 - [ ] First signed release: `sh scripts/verify-install.sh <version> all` passes with `signature verified` on linux/amd64, linux/arm64 and macOS
 

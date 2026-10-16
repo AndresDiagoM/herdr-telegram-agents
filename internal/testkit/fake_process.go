@@ -145,12 +145,12 @@ func (p *FakeProcess) Alive(pid int) bool {
 	return p.alive[pid]
 }
 
-func (p *FakeProcess) Stop(pid int) error {
-	return p.signal("stop", pid, !p.ignoreStopLocked())
+func (p *FakeProcess) Stop(pid int, verified bool) error {
+	return p.signal("stop", pid, !p.ignoreStopLocked(), verified)
 }
 
-func (p *FakeProcess) Resync(pid int) error {
-	return p.signal("resync", pid, false)
+func (p *FakeProcess) Resync(pid int, verified bool) error {
+	return p.signal("resync", pid, false, verified)
 }
 
 // Status answers like the daemon's control channel.
@@ -184,9 +184,12 @@ func (p *FakeProcess) ignoreStopLocked() bool {
 	return p.ignoreStop
 }
 
-func (p *FakeProcess) signal(kind string, pid int, ends bool) error {
+func (p *FakeProcess) signal(kind string, pid int, ends, verified bool) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.noControl && !verified {
+		return fmt.Errorf("%s: %w", kind, domain.ErrControlUnavailable)
+	}
 	p.signals = append(p.signals, fmt.Sprintf("%s:%d", kind, pid))
 	if p.noControl {
 		return fmt.Errorf("%s: %w", kind, domain.ErrControlUnavailable)

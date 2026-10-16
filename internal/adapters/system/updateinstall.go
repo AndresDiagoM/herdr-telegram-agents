@@ -108,11 +108,18 @@ func (i *UpdateInstaller) Backup(ctx context.Context, job domain.UpdateJob) (dom
 func (i *UpdateInstaller) Install(ctx context.Context, job domain.UpdateJob) error {
 	switch job.SourceKind {
 	case "github":
+		commit, err := hex.DecodeString(job.TargetCommit)
+		if err != nil || len(commit) != 20 || job.TargetCommit != strings.ToLower(job.TargetCommit) {
+			return fmt.Errorf("managed install requires the signed full commit")
+		}
 		bin := i.HerdrBin
 		if bin == "" {
 			bin = "herdr"
 		}
-		if err := i.runEnv(ctx, "", installerEnv(job), bin, "plugin", "install", "permgps/herdr-telegram-agents", "--ref", job.TargetTag, "--yes"); err != nil {
+		if i.Log != nil {
+			i.Log.Info("[FIX] installing signed commit", slog.String("job", job.ID), slog.String("commit", job.TargetCommit))
+		}
+		if err := i.runEnv(ctx, "", installerEnv(job), bin, "plugin", "install", "permgps/herdr-telegram-agents", "--ref", job.TargetCommit, "--yes"); err != nil {
 			return fmt.Errorf("managed install: %w", err)
 		}
 	case "local":

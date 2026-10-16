@@ -231,3 +231,42 @@ func TestSupervisorDescribe(t *testing.T) {
 	}
 	_ = pid
 }
+
+func TestSupervisorResyncUnverifiedPID(t *testing.T) {
+	for _, available := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unavailable", true: "available"}[available], func(t *testing.T) {
+			f := newSup(t)
+			pid, _, _ := f.sup.Start(context.Background())
+			f.proc.SetUnverified(true)
+			f.proc.SetControlUnavailable(!available)
+			err := f.sup.Resync()
+			if available && err != nil || !available && !errors.Is(err, domain.ErrControlUnavailable) {
+				t.Fatalf("Resync = %v, control available=%t", err, available)
+			}
+			if !f.proc.Alive(pid) {
+				t.Fatal("unverified process terminated")
+			}
+			if !available && len(f.proc.Signals()) != 0 {
+				t.Fatalf("unverified process signalled: %v", f.proc.Signals())
+			}
+		})
+	}
+}
+
+func TestSupervisorStopUnverifiedPIDNeverEscalates(t *testing.T) {
+	f := newSup(t)
+	pid, _, _ := f.sup.Start(context.Background())
+	f.proc.SetUnverified(true)
+	f.proc.IgnoreStop(true)
+	if err := f.drive(t, func() error { return f.sup.Stop(context.Background()) }); err == nil {
+		t.Fatal("Stop succeeded although the unverified process stayed alive")
+	}
+	if !f.proc.Alive(pid) || f.proc.Held() != pid {
+		t.Fatal("unverified process killed or its pid file released")
+	}
+	for _, signal := range f.proc.Signals() {
+		if strings.HasPrefix(signal, "kill:") {
+			t.Fatalf("unverified process killed: %v", f.proc.Signals())
+		}
+	}
+}

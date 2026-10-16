@@ -685,9 +685,11 @@ changed target, duplicate press, or press by another account cannot start
 another job. There are no scheduled checks or unattended installs.
 
 Herdr-managed GitHub installs use `herdr plugin install
-permgps/herdr-telegram-agents --ref <exact-tag> --yes`. An intentional
-`--ref` pin is left alone. A previous exact tag installed by this update
-action is recognised from `update.json`, so it does not block a later update.
+permgps/herdr-telegram-agents --ref <signed-commit> --yes`, so a moved tag
+cannot select different build scripts. An intentional `--ref` pin is left
+alone. A previous commit installed by this update action (or a tag installed
+by an older version) is recognised from its successful `update.json` record,
+so it does not block a later update.
 A local link stays local: its `main` branch must be clean, have the expected
 GitHub origin, and be able to fast-forward to the release commit on the
 remote mainline. The worker saves the old binary, stops a running daemon,
@@ -699,9 +701,10 @@ it. On a managed install that variable reaches the script only if Herdr
 passes its environment to the `[[build]]` step, which is not documented.
 The design does not depend on it:
 
-- The script runs `herdr-tg version` only after a verified signature or a
-  matching approved checksum. Otherwise it prints `skipped running an
-  unverified binary`.
+- The script installs and runs `herdr-tg version` only after a verified
+  signature or a matching approved checksum. Otherwise it fails before
+  replacing the existing binary or receipt. Checksums downloaded beside a
+  binary are insufficient by themselves.
 - The script writes `bin/install-receipt` (`sha256`, `approved`,
   `signature`). The worker logs it, and logs `[FIX] approved checksum did not
   reach the install script` when the receipt says `approved none`.
@@ -710,14 +713,15 @@ The design does not depend on it:
   environment.
 
 After the install, of either kind, the worker checks the SHA-256 of the new
-`bin/herdr-tg` against the approved one before anything runs it, including
-reading its version. A mismatch rolls back without the new binary ever
-starting.
+`bin/herdr-tg` against the approved one before the worker reads its version
+or starts the daemon. A mismatch rolls back. The install script may already
+have run its version command after its own trust check described above.
 
 A managed install must also resolve to the signed commit: Herdr's
 `resolved_commit` after the install must equal the commit in
-`release.txt`. Otherwise the worker rolls back with `commit_mismatch`, for
-example when the tag moved after signing. A managed job without a signed
+`release.txt`. Otherwise the worker rolls back with `commit_mismatch`.
+This is an additional check after installing by commit, not the first
+check of the selected source. A managed job without a signed
 commit fails with `commit_unknown` before anything is touched.
 Detached branches, local changes, another repository, and an incompatible
 Herdr version show the release and a reason without an Update button.
@@ -1030,7 +1034,10 @@ tightened`). Other files in those directories and symlinks are not touched.
 
 `stop`, `resync` and `status` reach the daemon through that control channel.
 A daemon from an older build that does not answer still receives SIGTERM or
-SIGHUP on Unix and is killed if it answers neither. The `status` action prints
+SIGHUP on Unix and is killed if it answers neither, but only when the PID's
+identity has been verified. An unverified PID can be controlled only through
+the control channel; an unavailable channel or a stop timeout returns an
+error without sending a signal or killing that process. The `status` action prints
 the daemon's own line: `version=… pid=… uptime=… agents=… dropped=… herdr=ok|failing
 since … sync=on|off cleanup=<n>d|off quiet=on|away|away-manual|off
 pager=on|off|unreachable telegram=ready` while polling has started. A

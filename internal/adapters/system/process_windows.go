@@ -54,7 +54,7 @@ func (p *Process) StartTime(pid int) (time.Time, bool) {
 // Stop asks the daemon through its control pipe. Windows has no signal to
 // fall back to, so a daemon that is not listening is reported as such and
 // the supervisor escalates to Kill.
-func (p *Process) Stop(pid int) error {
+func (p *Process) Stop(pid int, _ bool) error {
 	_, err := p.control(ControlStop)
 	if err != nil {
 		p.log.Debug("control stop failed", slog.Int("pid", pid), slog.String("err", err.Error()))
@@ -63,7 +63,7 @@ func (p *Process) Stop(pid int) error {
 }
 
 // Resync asks the daemon through its control pipe; see Stop.
-func (p *Process) Resync(pid int) error {
+func (p *Process) Resync(pid int, _ bool) error {
 	_, err := p.control(ControlResync)
 	if err != nil {
 		p.log.Debug("control resync failed", slog.Int("pid", pid), slog.String("err", err.Error()))

@@ -148,21 +148,16 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	if !st.Running {
 		return domain.ErrNotRunning
 	}
-	if !st.Verified {
-		// The pid's start time is unknown, so it may belong to any
-		// process. Only a daemon that answers its control channel is
-		// provably ours; never signal anything else.
-		if _, err := s.proc.Status(ctx); errors.Is(err, domain.ErrControlUnavailable) {
-			s.log.Warn("[FIX] unverified pid without control channel, not signalling", slog.Int("pid", st.PID))
-			return fmt.Errorf("pid %d is not verifiably the daemon and does not answer its control channel; remove daemon.pid by hand if no daemon runs", st.PID)
-		}
-	}
-	if err := s.proc.Stop(st.PID); err != nil {
+	if err := s.proc.Stop(st.PID, st.Verified); err != nil {
 		if errors.Is(err, domain.ErrNotRunning) {
 			return domain.ErrNotRunning
 		}
 		if !errors.Is(err, domain.ErrControlUnavailable) {
 			return err
+		}
+		if !st.Verified {
+			s.log.Warn("[FIX] unverified pid without control channel, not signalling", slog.Int("pid", st.PID))
+			return fmt.Errorf("pid %d is not verifiably the daemon: %w", st.PID, err)
 		}
 		s.log.Warn("daemon has no control channel, killing", slog.Int("pid", st.PID), slog.String("err", err.Error()))
 		if err := s.proc.Kill(st.PID); err != nil && !errors.Is(err, domain.ErrNotRunning) {
@@ -176,6 +171,10 @@ func (s *Supervisor) Stop(ctx context.Context) error {
 	deadline := s.clock.Now().Add(s.StopTimeout)
 	for s.proc.Alive(st.PID) {
 		if !s.clock.Now().Before(deadline) {
+			if !st.Verified {
+				s.log.Warn("[FIX] refusing to kill unverified pid after stop timeout", slog.Int("pid", st.PID))
+				return fmt.Errorf("pid %d did not stop; refusing to kill an unverified process", st.PID)
+			}
 			s.log.Warn("daemon ignored stop, killing", slog.Int("pid", st.PID))
 			if err := s.proc.Kill(st.PID); err != nil && !errors.Is(err, domain.ErrNotRunning) {
 				return fmt.Errorf("kill daemon: %w", err)
@@ -206,7 +205,7 @@ func (s *Supervisor) Resync() error {
 	if !st.Running {
 		return domain.ErrNotRunning
 	}
-	if err := s.proc.Resync(st.PID); err != nil {
+	if err := s.proc.Resync(st.PID, st.Verified); err != nil {
 		return err
 	}
 	s.log.Info("daemon resync requested", slog.Int("pid", st.PID))

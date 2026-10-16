@@ -33,10 +33,12 @@ type ProcessControl interface {
 	Spawn(ctx context.Context, args []string) (int, error)
 	// Alive reports whether a process with the pid exists.
 	Alive(pid int) bool
-	// Stop asks the daemon to shut down gracefully.
-	Stop(pid int) error
-	// Resync asks the daemon to run a full reconcile.
-	Resync(pid int) error
+	// Stop asks the daemon to shut down gracefully. Signal fallback is
+	// permitted only when verified proves that pid belongs to the daemon.
+	Stop(pid int, verified bool) error
+	// Resync asks the daemon to run a full reconcile, with the same signal
+	// fallback restriction as Stop. Unverified pids use only the control channel.
+	Resync(pid int, verified bool) error
 	// Status asks the daemon for its one-line status.
 	Status(ctx context.Context) (string, error)
 	// Kill terminates the daemon immediately.

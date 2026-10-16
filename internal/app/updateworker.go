@@ -47,8 +47,8 @@ func (w *UpdateWorker) Run(ctx context.Context, id string) (domain.UpdateJob, er
 	if job.ID != id || job.Phase != "queued" {
 		return job, fmt.Errorf("update job is not queued for this worker")
 	}
-	// A managed install is bound to the signed commit after the fact; a job
-	// without one cannot be checked, so nothing is touched.
+	// A managed install checks out the signed commit before running its build
+	// scripts; reject jobs without that commit before touching anything.
 	if job.SourceKind == "github" && !commitPattern.MatchString(job.TargetCommit) {
 		return w.fail(ctx, job, "commit_unknown", fmt.Errorf("update job has no signed target commit"))
 	}

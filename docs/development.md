@@ -8,7 +8,7 @@ install` downloads a prebuilt binary (see the README).
 
 ## Requirements
 
-- Go `1.25.14` or newer (use a maintained security patch release)
+- Go `1.26.9` or newer (use a maintained security patch release)
 - `staticcheck` in `$HOME/go/bin` (`make lint` runs it)
 - [GoReleaser](https://goreleaser.com) only for `make release-snapshot`
 
@@ -140,7 +140,7 @@ the operator and panel. Pressing Update consumes and revalidates it.
 `update.json` is an atomic state-dir journal. The daemon writes a queued job
 and launches `update-worker <job-id>` from a copy of its executable in the
 state dir. The worker takes `update.lock/`, backs up the old version, stops
-the daemon if it was running, installs the selected tag, and starts the
+the daemon if it was running, installs the signed release commit, and starts the
 binary at the new plugin root. The status control channel must report a
 new pid, target version, `herdr=ok` and `telegram=ready` before success.
 Only then does the worker edit the original General panel with the final
