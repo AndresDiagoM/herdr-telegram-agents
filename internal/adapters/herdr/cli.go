@@ -45,12 +45,29 @@ func NewCLI(bin, root, path string, log *slog.Logger) *CLI {
 // hooks are (verified 2026-09-02: "No viable candidates found in PATH").
 // The pane inherits the PATH given here, so the plugin root goes first and
 // the manifest's relative "bin/herdr-tg" resolves to <root>/bin/herdr-tg.
+//
+// --focus: Herdr opens a plugin pane unfocused, so the logs and doctor
+// overlays never saw the Esc or q they advertise (issue #48). A Herdr that
+// does not know the flag gets the same call without it, as before.
 func (c *CLI) OpenPane(ctx context.Context, pluginID, entrypoint string) error {
 	args := []string{"plugin", "pane", "open", "--plugin", pluginID, "--entrypoint", entrypoint}
 	if c.root != "" {
 		args = append(args, "--env", "PATH="+panePath(c.root, c.path))
 	}
+	focused := append([]string{"plugin", "pane", "open", "--focus"}, args[3:]...)
+	err := c.run(ctx, focused)
+	if err == nil || !rejectsFocus(err) {
+		return err
+	}
+	c.log.Debug("pane open without --focus", slog.String("entrypoint", entrypoint), slog.Any("err", err))
 	return c.run(ctx, args)
+}
+
+// rejectsFocus reports whether herdr refused the --focus flag itself. The
+// error text also carries the argv, so the bare flag name is not enough.
+func rejectsFocus(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "unknown option: --focus") || strings.Contains(msg, "'--focus'")
 }
 
 // panePath prepends root to a PATH list.

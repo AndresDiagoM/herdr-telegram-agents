@@ -18,9 +18,13 @@ import (
 const doctorPaneTimeout = 30 * time.Second
 
 // runDoctorPane handles `doctor-pane`: it runs every diagnostic check,
-// prints one line per check and a summary, then waits for Esc or q (or
-// the end of stdin) so the overlay stays readable.
+// prints one line per check and a summary, then waits for Esc, q, Ctrl-C
+// or Ctrl-D (or the end of stdin) so the overlay stays readable.
 func runDoctorPane(rc *runContext, _ []string) int {
+	// Raw before the checks run, so a key pressed meanwhile is not echoed
+	// into the list.
+	rc, restore := rawPane(rc)
+	defer restore()
 	env, err := wire.env()
 	if err != nil {
 		fmt.Fprintf(rc.stderr, "herdr-tg doctor-pane: %v\n", err)

@@ -30,8 +30,10 @@ const (
 )
 
 // runLogsPane is the [[panes]] overlay: last lines of daemon.log rendered
-// for humans, then follow until Ctrl-C, Esc or q.
+// for humans, then follow until Ctrl-C, Ctrl-D, Esc or q.
 func runLogsPane(rc *runContext, _ []string) int {
+	rc, restore := rawPane(rc)
+	defer restore()
 	env, err := wire.env()
 	if err != nil {
 		fmt.Fprintf(rc.stderr, "herdr-tg logs-pane: %v\n", err)
@@ -54,13 +56,15 @@ func runLogsPane(rc *runContext, _ []string) int {
 	return exitOK
 }
 
-// watchQuitKeys cancels when stdin delivers Esc or q, or closes.
+// watchQuitKeys cancels when stdin delivers Esc or q, or closes. A raw
+// terminal (rawPane) delivers Ctrl-C and Ctrl-D as bytes, not as a signal
+// and an end of input, so they count as well.
 func watchQuitKeys(in io.Reader, cancel context.CancelFunc) {
 	buf := make([]byte, 64)
 	for {
 		n, err := in.Read(buf)
 		for _, b := range buf[:n] {
-			if b == 0x1b || b == 'q' || b == 'Q' {
+			if b == 0x1b || b == 'q' || b == 'Q' || b == 0x03 || b == 0x04 {
 				cancel()
 				return
 			}

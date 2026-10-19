@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -135,7 +136,7 @@ func TestTailerWaitsForMissingFile(t *testing.T) {
 }
 
 func TestWatchQuitKeys(t *testing.T) {
-	for _, in := range []string{"q", "\x1b", "abc\x1b[A", ""} {
+	for _, in := range []string{"q", "\x1b", "abc\x1b[A", "", "\x03", "\x04", "abc"} {
 		_, cancel := context.WithCancel(context.Background())
 		fired := make(chan struct{})
 		go watchQuitKeys(strings.NewReader(in), func() { cancel(); close(fired) })
@@ -144,6 +145,31 @@ func TestWatchQuitKeys(t *testing.T) {
 		case <-time.After(time.Second):
 			t.Fatalf("input %q did not cancel", in)
 		}
+	}
+}
+
+// TestWatchQuitKeysIgnoresOtherKeys: other keys leave the pane open while
+// stdin stays open.
+func TestWatchQuitKeysIgnoresOtherKeys(t *testing.T) {
+	r, w := io.Pipe()
+	defer w.Close()
+	fired := make(chan struct{})
+	go watchQuitKeys(r, func() { close(fired) })
+	if _, err := w.Write([]byte("abc\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fired:
+		t.Fatal("cancelled on keys that are not quit keys")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := w.Write([]byte("q")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("q after other keys did not cancel")
 	}
 }
 

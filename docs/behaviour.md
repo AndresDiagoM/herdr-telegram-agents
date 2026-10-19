@@ -1051,6 +1051,11 @@ saved in `config.json` (default `info`). The daemon writes JSON lines to
 `15:04:05 INFO message key=value`. Control characters (ESC, BEL, C1) and bidi
 overrides in a line, for example in a stranger's Telegram name, are shown
 escaped (`\x1b`, `\u202e`) and never reach the terminal.
+The logs and doctor overlays open focused (`herdr plugin pane open
+--focus`) and close on a bare Esc, q, Ctrl-C or Ctrl-D, no Enter needed:
+the pane reads its keys in raw mode while it is open. A Herdr that does
+not know `--focus` opens them unfocused as before; click the overlay
+first.
 Message text never reaches the log, not even at debug: command lines carry
 its length (`text_runes`). While Telegram is unreachable a failed poll is
 warned once and then at most once per 10 minutes, with the number of
