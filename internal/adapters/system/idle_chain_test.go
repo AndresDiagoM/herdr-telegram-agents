@@ -84,6 +84,24 @@ func TestSampleChain(t *testing.T) {
 			},
 			runs: []string{"a", "c"}, errParts: []string{"a: boom", "c: " + errNoXprintidle.Error()},
 		},
+		{
+			// Mutter answers ServiceUnknown (GNOME not running): a
+			// definitive "no source", not a transient failure.
+			name: "definitive answer is no source",
+			probes: func(r *[]string) []idleProbe {
+				return []idleProbe{probe("mutter", true, "", errors.New("org.freedesktop.DBus.Error.ServiceUnknown"), r)}
+			},
+			runs: []string{"mutter"}, unsupp: true,
+		},
+		{
+			// NotSupported from org.freedesktop.ScreenSaver is definitive
+			// too; a later probe can still answer.
+			name: "definitive then real answer",
+			probes: func(r *[]string) []idleProbe {
+				return []idleProbe{probe("mutter", true, "", errors.New("NotSupported"), r), probe("b", true, "7", nil, r)}
+			},
+			want: 7 * time.Millisecond, source: "b", runs: []string{"mutter", "b"},
+		},
 	}
 	for _, tc := range cases {
 		var runs []string

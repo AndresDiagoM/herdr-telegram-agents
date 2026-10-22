@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
@@ -26,16 +27,26 @@ type Presence struct {
 
 	// atDesk is the latest automatic verdict, sampled says whether one
 	// exists yet, unsupported that the source answered ErrIdleUnsupported
-	// (final for the daemon's life), failing that the last sample failed
-	// (so the warning is logged once).
+	// (retried every presenceUnsupportedRetry in case one appears),
+	// failing that the last sample failed (so the warning is logged once).
 	atDesk      bool
 	sampled     bool
 	unsupported bool
 	failing     bool
+	// lastSampleTry is when the source was last asked; an unsupported
+	// platform is not asked again until presenceUnsupportedRetry passed.
+	lastSampleTry time.Time
 	// manualAway and manualUntil are the /away override; a zero
-	// manualUntil means "until /here".
+	// manualUntil means "until /here". manualHere is the /here override on
+	// a platform without an idle source: quiet on until /away.
 	manualAway  bool
 	manualUntil time.Time
+	manualHere  bool
+	// manualHereAuto marks a manualHere the daemon applied by itself (no
+	// idle source: quiet starts at the desk). A working source clears it,
+	// and /away disables the default for the rest of the run (awayChosen).
+	manualHereAuto bool
+	awayChosen     bool
 	// quiet is the last effective flag handed out through Changes.
 	quiet bool
 
@@ -83,6 +94,7 @@ func (p *Presence) state() domain.PresenceState {
 		Supported:  !p.unsupported,
 		AtDesk:     p.sampled && p.atDesk,
 		ManualAway: p.manualAway,
+		ManualHere: p.manualHere,
 		Until:      p.manualUntil,
 		Quiet:      p.quiet,
 	}
@@ -92,19 +104,29 @@ func (p *Presence) state() domain.PresenceState {
 // effective flag. It runs on the daemon goroutine, driven by one ticker, so
 // polls never overlap: the probe runs without the lock, so a slow source
 // cannot stall Quiet and State on the bridge goroutine, and its result
-// needs no generation check before it is stored.
+// needs no generation check before it is stored. A platform that answered
+// unsupported is asked again every presenceUnsupportedRetry in case a
+// source appears later.
 func (p *Presence) Poll(ctx context.Context) {
 	p.mu.Lock()
 	now := p.clock.Now()
 	if p.manualAway && !p.manualUntil.IsZero() && !now.Before(p.manualUntil) {
 		p.manualAway, p.manualUntil = false, time.Time{}
+		p.awayChosen = false
 		p.log.Info("away expired, presence automatic again")
 	}
-	if p.unsupported {
+	if p.idle == nil {
+		// No source to sample (nil tracker): never quiet automatically.
 		p.recompute()
 		p.mu.Unlock()
 		return
 	}
+	if p.unsupported && !p.lastSampleTry.IsZero() && now.Sub(p.lastSampleTry) < presenceUnsupportedRetry {
+		p.recompute()
+		p.mu.Unlock()
+		return
+	}
+	p.lastSampleTry = now
 	threshold := p.opts.QuietIdle()
 	p.mu.Unlock()
 
@@ -120,20 +142,44 @@ func (p *Presence) Poll(ctx context.Context) {
 func (p *Presence) sample(d time.Duration, err error, threshold time.Duration) {
 	switch {
 	case errors.Is(err, domain.ErrIdleUnsupported):
+		if !p.unsupported {
+			p.log.Warn("presence: no input idle source on this platform; quiet starts at the desk, /away releases it")
+		}
+		// With no source the daemon assumes the operator is at the desk:
+		// quiet starts on (Telegram silent) until /away says otherwise.
+		// Only in a graphical session: on a headless server the safe
+		// default stays "everything", so posts are never held forever.
+		if hasGraphicalSession(os.LookupEnv) && !p.awayChosen && !p.manualAway && !p.manualHere {
+			p.manualHere, p.manualHereAuto = true, true
+			p.log.Info("presence: no idle source, starting at the desk until /away")
+		}
 		p.unsupported = true
 		p.atDesk, p.sampled = false, true
-		p.log.Warn("presence: no input idle source on this machine, quiet mode stays off; /away and /here still answer")
 		return
 	case err != nil:
 		if !p.failing {
 			p.failing = true
 			p.log.Warn("presence sample failed, keeping the previous verdict", slog.String("err", err.Error()), slog.Bool("at_desk", p.atDesk))
 		}
+		if hasGraphicalSession(os.LookupEnv) && !p.awayChosen && !p.manualAway && !p.manualHere && !p.sampled {
+			// The source exists but never gave a verdict (a Wayland session
+			// the probes cannot read): assume the operator is at the desk.
+			p.manualHere, p.manualHereAuto = true, true
+			p.log.Info("presence: no verdict from the idle source, starting at the desk until /away")
+		}
 		return
 	}
 	if p.failing {
 		p.failing = false
 		p.log.Info("presence source recovered")
+	}
+	if p.unsupported {
+		p.unsupported = false
+		p.log.Info("presence source appeared")
+	}
+	if p.manualHereAuto {
+		// The at-desk default yields to the automatic verdict.
+		p.manualHere, p.manualHereAuto = false, false
 	}
 	atDesk := d < threshold
 	if !p.sampled || atDesk != p.atDesk {
@@ -149,6 +195,9 @@ func (p *Presence) Away(d time.Duration, by int64) domain.PresenceState {
 	defer p.mu.Unlock()
 	p.manualAway = true
 	p.manualUntil = time.Time{}
+	p.manualHere = false
+	p.manualHereAuto = false
+	p.awayChosen = true
 	if d > 0 {
 		p.manualUntil = p.clock.Now().Add(d)
 	}
@@ -157,12 +206,18 @@ func (p *Presence) Away(d time.Duration, by int64) domain.PresenceState {
 	return p.state()
 }
 
-// Here clears the /away override; the automatic verdict rules again.
+// Here clears the /away override and the automatic verdict rules again.
+// Without an idle source it is also the manual "at the desk": quiet turns
+// on until /away, so the workflow works on platforms like KDE Wayland.
 func (p *Presence) Here(by int64) domain.PresenceState {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.manualAway, p.manualUntil = false, time.Time{}
-	p.log.Info("presence automatic", slog.Int64("by", by), slog.Bool("at_desk", p.atDesk))
+	if p.unsupported {
+		p.manualHere = true
+		p.manualHereAuto = false
+	}
+	p.log.Info("presence here", slog.Int64("by", by), slog.Bool("manual", p.manualHere), slog.Bool("at_desk", p.atDesk))
 	p.recompute()
 	return p.state()
 }
@@ -178,13 +233,14 @@ func (p *Presence) Recompute() {
 // hands the new value to the daemon loop, replacing an undelivered one so
 // the loop always sees the latest state.
 func (p *Presence) recompute() {
-	quiet := p.opts.QuietEnabled() && !p.unsupported && p.sampled && p.atDesk && !p.manualAway
+	automatic := !p.unsupported && p.sampled && p.atDesk
+	quiet := p.opts.QuietEnabled() && !p.manualAway && (p.manualHere || automatic)
 	if quiet == p.quiet {
 		return
 	}
 	p.quiet = quiet
 	if quiet {
-		p.log.Info("quiet on: operator at the desk")
+		p.log.Info("quiet on: operator at the desk", slog.Bool("manual", p.manualHere))
 	} else {
 		p.log.Info("quiet off: operator away, catching up", slog.Bool("manual", p.manualAway), slog.Bool("at_desk", p.atDesk))
 	}
@@ -193,4 +249,17 @@ func (p *Presence) recompute() {
 	default:
 	}
 	p.changes <- quiet
+}
+
+// hasGraphicalSession reports whether the process runs inside a graphical
+// session (Wayland or X11). On a headless server none of these are set and
+// the "at the desk by default" assumption must not apply, so quiet never
+// engages on its own.
+func hasGraphicalSession(lookup func(string) (string, bool)) bool {
+	for _, key := range []string{"WAYLAND_DISPLAY", "DISPLAY", "XDG_SESSION_TYPE"} {
+		if v, ok := lookup(key); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }

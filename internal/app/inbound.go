@@ -91,19 +91,20 @@ const (
 	// presenceAwayUntil and presenceAwayOpen answer /away.
 	presenceAwayUntil = "🏃 away until %s, Telegram gets everything; /here returns to automatic"
 	presenceAwayOpen  = "🏃 away until /here, Telegram gets everything"
-	// presenceAwayNone answers /away where the machine has no idle source:
-	// quiet never engages there, so there is nothing to lift.
-	presenceAwayNone = "quiet mode has no input idle source on this machine, Telegram already gets everything"
+	// presenceHereManual answers /here where the machine has no idle
+	// source: quiet turned on by hand.
+	presenceHereManual = "🖥 quiet on until /away (no input idle source on this machine)"
 	// presenceHereFmt answers /here with the automatic verdict.
 	presenceHereFmt     = "🖥 presence is automatic again: %s"
 	presenceVerdictDesk = "at the desk, quiet on"
 	presenceVerdictAway = "away"
 	presenceVerdictNone = "no input idle source on this machine"
 	// Headers of the General /status summary.
-	presenceHeaderQuiet  = "🔕 quiet: you are at the desk (/away to override)\n"
-	presenceHeaderManual = "🏃 away (manual) until %s\n"
-	presenceHeaderOpen   = "🏃 away (manual) until /here\n"
-	presenceTimeLayout   = "15:04"
+	presenceHeaderQuiet      = "🔕 quiet: you are at the desk (/away to override)\n"
+	presenceHeaderManual     = "🏃 away (manual) until %s\n"
+	presenceHeaderManualHere = "🖐 presence by hand: /away when you leave\n"
+	presenceHeaderOpen       = "🏃 away (manual) until /here\n"
+	presenceTimeLayout       = "15:04"
 )
 
 // inbound turns operator messages into Herdr calls and answers commands.
@@ -949,9 +950,6 @@ func (i *inbound) away(d time.Duration, by int64) string {
 		return presenceUnavailable
 	case !i.opts.QuietEnabled():
 		return presenceOff
-	case !i.presence.State().Supported:
-		i.log.Debug("away refused: no idle source", slog.Int64("by", by))
-		return presenceAwayNone
 	}
 	st := i.presence.Away(d, by)
 	i.log.Debug("away applied", slog.Int64("by", by), slog.Time("until", st.Until), slog.String("word", st.Word()))
@@ -971,12 +969,16 @@ func (i *inbound) here(by int64) string {
 	}
 	st := i.presence.Here(by)
 	i.log.Debug("here applied", slog.Int64("by", by), slog.String("word", st.Word()))
+	if st.ManualHere && st.Quiet {
+		// No idle source here: /here turned quiet on by hand.
+		return presenceHereManual
+	}
 	verdict := presenceVerdictAway
 	switch {
-	case !st.Supported:
-		verdict = presenceVerdictNone
 	case st.Quiet:
 		verdict = presenceVerdictDesk
+	case !st.Supported:
+		verdict = presenceVerdictNone
 	}
 	return fmt.Sprintf(presenceHereFmt, verdict)
 }

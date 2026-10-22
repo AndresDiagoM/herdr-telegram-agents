@@ -95,6 +95,10 @@ const (
 	// presenceInterval is how often the daemon samples the machine's input
 	// idle time to decide whether the operator is at the desk.
 	presenceInterval = 10 * time.Second
+	// presenceUnsupportedRetry is how often a machine that reported no
+	// idle source is asked again, so a source that appears later (desktop
+	// login, helper installed) recovers without a restart.
+	presenceUnsupportedRetry = time.Minute
 	// turnSettle is how long an agent must stay idle before its turn counts
 	// as over (✅ reaction, turn duration); Herdr's detection dips out of
 	// working for a second or two while a tool runs, so a shorter wait
