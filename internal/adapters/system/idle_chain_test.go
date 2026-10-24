@@ -3,6 +3,7 @@ package system
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"slices"
@@ -85,22 +86,40 @@ func TestSampleChain(t *testing.T) {
 			runs: []string{"a", "c"}, errParts: []string{"a: boom", "c: " + errNoXprintidle.Error()},
 		},
 		{
-			// Mutter answers ServiceUnknown (GNOME not running): a
-			// definitive "no source", not a transient failure.
-			name: "definitive answer is no source",
+			// KDE Plasma on Wayland with XWayland: no GNOME Shell on the
+			// bus, and an X server without MIT-SCREEN-SAVER. Both answers
+			// are definitive, so the platform has no source.
+			name: "kde wayland is no source",
 			probes: func(r *[]string) []idleProbe {
-				return []idleProbe{probe("mutter", true, "", errors.New("org.freedesktop.DBus.Error.ServiceUnknown"), r)}
+				return []idleProbe{
+					probe("mutter", true, "", errors.New("exit status 1: Error: GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name org.gnome.Mutter.IdleMonitor was not provided by any .service files"), r),
+					probe("xprintidle", true, "", errors.New("exit status 1: screen saver extension not supported"), r),
+				}
 			},
-			runs: []string{"mutter"}, unsupp: true,
+			runs: []string{"mutter", "xprintidle"}, unsupp: true,
 		},
 		{
-			// NotSupported from org.freedesktop.ScreenSaver is definitive
-			// too; a later probe can still answer.
-			name: "definitive then real answer",
+			// A definitive answer leaves the next probe its turn.
+			name: "no source then real answer",
 			probes: func(r *[]string) []idleProbe {
-				return []idleProbe{probe("mutter", true, "", errors.New("NotSupported"), r), probe("b", true, "7", nil, r)}
+				return []idleProbe{probe("mutter", true, "", errors.New("GDBus.Error:org.freedesktop.DBus.Error.NotSupported: no"), r), probe("b", true, "7", nil, r)}
 			},
 			want: 7 * time.Millisecond, source: "b", runs: []string{"mutter", "b"},
+		},
+		{
+			// A display that does not open may be one still starting, and
+			// unreadable output is no verdict: both transient, so the
+			// previous verdict stays and the no-source answer is not logged.
+			name: "no source with transient failures",
+			probes: func(r *[]string) []idleProbe {
+				return []idleProbe{
+					probe("mutter", true, "", errors.New("GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: gone"), r),
+					probe("xprintidle", true, "", fmt.Errorf("couldn't open display: %w", boom), r),
+					probe("c", true, "junk", nil, r),
+				}
+			},
+			runs:     []string{"mutter", "xprintidle", "c"},
+			errParts: []string{"xprintidle: couldn't open display: boom", "c: " + errNoXprintidle.Error()},
 		},
 	}
 	for _, tc := range cases {

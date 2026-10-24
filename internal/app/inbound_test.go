@@ -963,6 +963,9 @@ func TestInboundPresenceUnavailableAndTopicHint(t *testing.T) {
 	if got := general(f, t, 2, "/here"); got != "🖥 quiet on until /away (no input idle source on this machine)" {
 		t.Fatalf("/here on unsupported platform = %q", got)
 	}
+	if got := general(f, t, 4, "/status"); !strings.HasPrefix(got, "🖐 presence by hand: /away when you leave\n") {
+		t.Fatalf("/status with presence by hand = %q", got)
+	}
 	if got := general(f, t, 3, "/away 2h"); !strings.HasPrefix(got, "🏃 away until ") || !strings.HasSuffix(got, ", Telegram gets everything; /here returns to automatic") {
 		t.Fatalf("/away on unsupported platform = %q", got)
 	}

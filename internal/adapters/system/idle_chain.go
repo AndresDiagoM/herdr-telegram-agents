@@ -22,16 +22,12 @@ type idleProbe struct {
 }
 
 // sampleChain asks the available probes in order; the first answer wins and
-// is returned with the probe's name. No available probe means the platform
-// has no source (ErrIdleUnsupported, final for the tracker). Probes that
-// exist but fail give a plain error naming each one, so a transient failure
-// keeps the previous verdict instead of switching quiet mode off.
-//
-// Definitive answers (ServiceUnknown from Mutter, NotSupported from
-// org.freedesktop.ScreenSaver, XWayland without MIT-SCREEN-SAVER) are treated
-// as "no source": they are not added to errs, so a chain where every
-// available probe answers definitively resolves to ErrIdleUnsupported instead
-// of a (never-recovering) probeErrors.
+// is returned with the probe's name. No available probe, or only probes
+// whose answer says this session has no such source (isNoSource), means the
+// platform has no source: ErrIdleUnsupported, which the tracker asks again
+// every minute. Probes that exist but fail otherwise give a plain error
+// naming each one, so a transient failure keeps the previous verdict instead
+// of switching quiet mode off.
 func sampleChain(ctx context.Context, probes []idleProbe) (time.Duration, string, error) {
 	var errs []error
 	for _, p := range probes {
@@ -43,7 +39,7 @@ func sampleChain(ctx context.Context, probes []idleProbe) (time.Duration, string
 		}
 		out, err := p.run(ctx)
 		if err != nil {
-			if isDefinitiveNoSource(err) {
+			if isNoSource(err) {
 				continue
 			}
 			errs = append(errs, fmt.Errorf("%s: %w", p.name, err))
@@ -51,9 +47,6 @@ func sampleChain(ctx context.Context, probes []idleProbe) (time.Duration, string
 		}
 		d, err := p.parse(out)
 		if err != nil {
-			if isDefinitiveNoSource(err) {
-				continue
-			}
 			errs = append(errs, fmt.Errorf("%s: %w", p.name, err))
 			continue
 		}
@@ -65,23 +58,23 @@ func sampleChain(ctx context.Context, probes []idleProbe) (time.Duration, string
 	return 0, "", probeErrors(errs)
 }
 
-// isDefinitiveNoSource reports whether err is a definitive "no idle source on
-// this machine" answer rather than a transient failure: Mutter's
-// ServiceUnknown (GNOME not running), org.freedesktop.ScreenSaver's
-// NotSupported, and XWayland without MIT-SCREEN-SAVER. These leave the
-// failing loop and resolve to ErrIdleUnsupported.
-func isDefinitiveNoSource(err error) bool {
-	if err == nil {
-		return false
-	}
+// noSourceMarkers are the helper answers that mean "this session has no
+// such source", matched case-insensitively against the helper's error with
+// its stderr: no GNOME Shell on the session bus (KDE Plasma, sway), a desktop
+// refusing the call, and an X server without the MIT-SCREEN-SAVER extension
+// (XWayland), in xprintidle's own words.
+var noSourceMarkers = []string{
+	"org.freedesktop.dbus.error.serviceunknown",
+	"org.freedesktop.dbus.error.notsupported",
+	"screen saver extension not supported",
+}
+
+// isNoSource reports whether a probe's failure is a definitive "no source
+// here" rather than a transient one (a timeout, no session bus yet, a
+// display that does not open).
+func isNoSource(err error) bool {
 	msg := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"serviceunknown",
-		"notsupported",
-		"mit-screen-saver",
-		"no x11 display",
-		"unable to open display",
-	} {
+	for _, marker := range noSourceMarkers {
 		if strings.Contains(msg, marker) {
 			return true
 		}
@@ -111,7 +104,8 @@ type runFunc func(ctx context.Context, name string, args ...string) ([]byte, err
 // sees only X input and fails safe as "away"). The ScreenSaver interface is
 // left out: its GetSessionIdleTime unit differs between desktops and Plasma
 // on Wayland refuses it. Availability reads only the environment and PATH;
-// whether the service answers is a runtime failure, never "unsupported".
+// a service that answers is a runtime failure unless its answer is one of
+// noSourceMarkers.
 // The parameters are seams for tests; production passes os and exec.
 func linuxProbes(lookup Lookup, lookPath func(string) (string, error), stat func(string) (os.FileInfo, error), run runFunc) []idleProbe {
 	set := func(key string) bool {

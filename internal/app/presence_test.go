@@ -181,79 +181,134 @@ func TestPresenceOptionChanges(t *testing.T) {
 	}
 }
 
-func TestPresenceUnsupportedAndFailing(t *testing.T) {
-	// A graphical session is required for the "at the desk by default"
-	// behaviour; DISPLAY stands in for Wayland or XDG_SESSION_TYPE.
-	t.Setenv("DISPLAY", ":0")
-	t.Setenv("WAYLAND_DISPLAY", "")
-	t.Setenv("XDG_SESSION_TYPE", "")
+// TestPresenceNoSourceDeskDefault covers a graphical session without an
+// idle source (KDE Plasma on Wayland): quiet starts at the desk, /away
+// releases it, a timed /away hands it back on expiry, /here brings it back,
+// and a source that appears later takes over.
+func TestPresenceNoSourceDeskDefault(t *testing.T) {
 	idle := testkit.NewFakeIdle(0)
 	idle.Unsupported()
 	f := newPresence(t, idle)
+	f.p.SetDeskDefault(true)
 	ctx := context.Background()
 	f.p.Poll(ctx)
-	// No source: quiet starts at the desk (silent) until /away.
-	if !f.p.Quiet() || f.p.State().Supported || idle.Calls() != 1 {
-		t.Fatalf("unsupported source: quiet=%v state=%+v calls=%d", f.p.Quiet(), f.p.State(), idle.Calls())
+	st := f.p.State()
+	if !f.p.Quiet() || st.Supported || !st.ManualHere || st.Word() != "on" || idle.Calls() != 1 {
+		t.Fatalf("desk default: quiet=%v state=%+v calls=%d", f.p.Quiet(), st, idle.Calls())
 	}
 	if v, ok := f.change(); !ok || !v {
-		t.Fatalf("at-desk default change = %v, %v", v, ok)
-	}
-	if got := f.p.State().Word(); got != "on" {
-		t.Errorf("Word = %q", got)
+		t.Fatalf("desk default change = %v, %v", v, ok)
 	}
 	f.p.Poll(ctx) // inside the retry window: not asked again
 	if idle.Calls() != 1 || !f.p.Quiet() {
 		t.Fatalf("retry window: calls=%d quiet=%v", idle.Calls(), f.p.Quiet())
 	}
 
-	// /away releases the default and it must not creep back by itself.
-	st := f.p.Away(0, 7)
-	if st.Quiet || !st.ManualAway || st.Word() != "off" {
-		t.Errorf("/away on unsupported platform = %+v", st)
+	// An open /away releases the default until /here, retries included.
+	st = f.p.Away(0, 7)
+	if st.Quiet || !st.ManualAway || st.Word() != "away-manual" {
+		t.Errorf("/away without a source = %+v", st)
 	}
 	if v, ok := f.change(); !ok || v {
 		t.Fatalf("change after /away = %v, %v", v, ok)
 	}
+	f.clock.Advance(time.Minute)
 	f.p.Poll(ctx)
-	if f.p.Quiet() {
-		t.Error("away re-engaged the at-desk default")
+	if f.p.Quiet() || idle.Calls() != 2 {
+		t.Fatalf("open /away after a retry: quiet=%v calls=%d", f.p.Quiet(), idle.Calls())
 	}
-
-	// /here turns quiet on by hand until /away.
 	st = f.p.Here(7)
 	if !st.ManualHere || !st.Quiet || st.Word() != "on" {
-		t.Errorf("/here manual = %+v", st)
+		t.Errorf("/here without a source = %+v", st)
 	}
 	if v, ok := f.change(); !ok || !v {
-		t.Fatalf("change after manual /here = %v, %v", v, ok)
+		t.Fatalf("change after /here = %v, %v", v, ok)
 	}
-	if st = f.p.Away(0, 7); st.ManualHere || st.Quiet || st.Word() != "off" {
-		t.Errorf("/away did not clear the manual here = %+v", st)
-	}
+
+	// A timed /away hands the default back the moment it expires, even
+	// inside the retry window.
+	f.p.Away(30*time.Second, 7)
 	f.change()
-	// Unsupported sources are retried; one that appears later recovers and
-	// the automatic verdict replaces the manual default.
-	f.p.Here(7)
-	f.change()
-	if idle.Calls() != 1 {
-		t.Fatalf("calls = %d, want the retry to wait", idle.Calls())
-	}
-	idle.Set(time.Second)
+	f.clock.Advance(30 * time.Second)
 	f.p.Poll(ctx)
-	if f.p.State().Supported {
-		t.Fatal("source recovered inside the retry window")
+	if !f.p.Quiet() || f.p.State().ManualAway || idle.Calls() != 2 {
+		t.Fatalf("timed /away expiry: quiet=%v state=%+v calls=%d", f.p.Quiet(), f.p.State(), idle.Calls())
+	}
+	if v, ok := f.change(); !ok || !v {
+		t.Fatalf("change after expiry = %v, %v", v, ok)
+	}
+
+	// A source that appears takes over from presence by hand, and /here then
+	// means automatic again.
+	f.p.Here(7)
+	idle.Set(time.Hour)
+	f.p.Poll(ctx)
+	if !f.p.Quiet() || f.p.State().Supported {
+		t.Fatalf("source asked inside the retry window: %+v", f.p.State())
 	}
 	f.clock.Advance(time.Minute)
 	f.p.Poll(ctx)
-	if !f.p.State().Supported || !f.p.Quiet() {
-		t.Fatalf("source did not recover: %+v", f.p.State())
+	st = f.p.State()
+	if f.p.Quiet() || !st.Supported || st.ManualHere || st.Word() != "away" {
+		t.Fatalf("source appeared while away: quiet=%v state=%+v", f.p.Quiet(), st)
+	}
+	if st = f.p.Here(7); st.Quiet || st.ManualHere {
+		t.Fatalf("/here after the source appeared = %+v", st)
+	}
+	idle.Set(time.Second)
+	f.p.Poll(ctx)
+	if !f.p.Quiet() || f.p.State().ManualHere {
+		t.Fatalf("automatic verdict at the desk: %+v", f.p.State())
+	}
+}
+
+// TestPresenceNoSourceHeadless pins the headless case: no graphical
+// session, so quiet stays off until /here asks for it by hand.
+func TestPresenceNoSourceHeadless(t *testing.T) {
+	idle := testkit.NewFakeIdle(0)
+	idle.Unsupported()
+	f := newPresence(t, idle)
+	f.p.SetDeskDefault(false)
+	ctx := context.Background()
+	f.p.Poll(ctx)
+	st := f.p.State()
+	if f.p.Quiet() || st.Supported || st.ManualHere || st.Word() != "off" {
+		t.Fatalf("headless without a source: quiet=%v state=%+v", f.p.Quiet(), st)
+	}
+	if _, ok := f.change(); ok {
+		t.Error("headless without a source queued a change")
+	}
+	if st = f.p.Here(7); !st.Quiet || !st.ManualHere {
+		t.Errorf("/here headless = %+v", st)
+	}
+	if st = f.p.Away(time.Minute, 7); st.Quiet || st.ManualHere {
+		t.Errorf("/away headless = %+v", st)
+	}
+	// The expiry hands back the headless default: off.
+	f.clock.Advance(time.Minute)
+	f.p.Poll(ctx)
+	if f.p.Quiet() || f.p.State().ManualAway {
+		t.Errorf("timed /away expiry headless: %+v", f.p.State())
 	}
 
 	nilSource := app.NewPresence(nil, f.opts, f.clock, nil)
 	nilSource.Poll(ctx)
 	if nilSource.Quiet() || nilSource.State().Supported {
 		t.Error("nil source should be unsupported")
+	}
+}
+
+func TestPresenceFailing(t *testing.T) {
+	ctx := context.Background()
+	// A failure before any verdict is no verdict: quiet stays off, desk
+	// default or not, since the source exists.
+	idle := testkit.NewFakeIdle(0)
+	idle.Fail(errors.New("gdbus: timeout"))
+	first := newPresence(t, idle)
+	first.p.SetDeskDefault(true)
+	first.p.Poll(ctx)
+	if first.p.Quiet() || !first.p.State().Supported || first.p.State().ManualHere {
+		t.Fatalf("first sample failed: quiet=%v state=%+v", first.p.Quiet(), first.p.State())
 	}
 
 	// A transient failure keeps the previous verdict.
@@ -269,22 +324,6 @@ func TestPresenceUnsupportedAndFailing(t *testing.T) {
 	g.p.Poll(ctx)
 	if g.p.Quiet() {
 		t.Error("recovered sample ignored")
-	}
-}
-
-// TestPresenceHeadlessNoSourceStaysOff pins the headless case: with no
-// graphical session the at-desk default must not engage, so posts are never
-// held forever on a server.
-func TestPresenceHeadlessNoSourceStaysOff(t *testing.T) {
-	for _, key := range []string{"DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"} {
-		t.Setenv(key, "")
-	}
-	idle := testkit.NewFakeIdle(0)
-	idle.Unsupported()
-	f := newPresence(t, idle)
-	f.p.Poll(context.Background())
-	if f.p.Quiet() || f.p.State().Quiet || f.p.State().ManualHere {
-		t.Fatalf("headless no source must stay off: %+v", f.p.State())
 	}
 }
 

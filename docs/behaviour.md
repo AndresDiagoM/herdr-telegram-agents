@@ -609,7 +609,7 @@ The options today:
 | `Herdr → Telegram sync` | Sync | Default on. Off: the daemon creates, edits and closes no topic and posts no screen until it is on again. Messages, keys, `/screen`, `/status` and presses on existing question buttons keep working, the screen capture keeps running, daemon notices keep posting. Back on: a full resync, like the `resync` action. A daemon that starts with sync off says so in its started notice, in the `/status` header (`🔇 …`), in the `status` action line (`sync=off`) and in the log. |
 | `Dashboard in General` | Sync | Default on. One pinned message in General, edited in place and never ringing: every live agent (up to 40, then `… +N more`) with its status, how long it has been in it and a link to its topic, `updated HH:MM` at the bottom. Off unpins and deletes it. See [The dashboard](#the-dashboard). |
 | `Quota in the dashboard` | Sync | Default on. The Claude and Codex usage windows under the dashboard and `/status` (`🔑 Codex 7d 3% ↻4 d 2 h`). Codex is read from its session files; Claude needs the status line tap the doctor action shows. No data, no line. Off drops the lines at the next refresh. See [Quota lines](#quota-lines). |
-| `Quiet while at the desk` | Quiet | Default off: every topic edit and screen post goes out at once, sounds included, so a fresh install shows the plugin at work. On: while you are at the desk, topic edits wait and screen posts are silent; everything catches up when you leave. On Linux it needs GNOME, or an X11 session with `xprintidle`; in a graphical session where none of them answers quiet starts at the desk (silent) and `/away` releases it, `/here` brings it back, while a headless server stays off by default; see the Presence bullet. Off means no presence check at all; `/away` and `/here` then answer that quiet mode is off. See [Quiet while at the desk](#quiet-while-at-the-desk). |
+| `Quiet while at the desk` | Quiet | Default off: every topic edit and screen post goes out at once, sounds included, so a fresh install shows the plugin at work. On: while you are at the desk, topic edits wait and screen posts are silent; everything catches up when you leave. On Linux it needs GNOME, or an X11 session with `xprintidle`; where none of them answers, a desktop session starts at the desk (silent) until `/away` and `/here` brings it back, while a headless server stays off until `/here`; see the Presence bullet. Off means no presence check at all; `/away` and `/here` then answer that quiet mode is off. See [Quiet while at the desk](#quiet-while-at-the-desk). |
 | `Away after` | Quiet | Default 3 min. Minutes without keyboard or mouse input on this machine before you count as away. A value outside the picker's list (say `45`) can be typed into `options.json` by hand. |
 | `Hold topic edits` | Quiet | Default on. While at the desk no topic is created, renamed, closed, reopened or given a new icon; each of those is a Telegram service message that rings the phone. Off keeps topic edits live while at the desk. |
 | `Screen posts` | Quiet | Default `Silent`. What happens to blocked and done screens while at the desk: `Silent` posts without a sound (Telegram still shows a silent banner), `Held` posts nothing until you leave, `Normal` posts as usual. |
@@ -816,20 +816,22 @@ you can see the plugin working. Tick `Quiet while at the desk` in
   `input idle source source=mutter|xprintidle`. Idle shorter than
   `Away after` means at the desk. Herdr's own pane focus is not used:
   another pane's agent would ring while you sit in front of it.
-- **Where there is no source** (a graphical session where no probe answers:
-  KDE Plasma on Wayland where Mutter answers `ServiceUnknown`, `sway` and
-  other Wayland desktops besides GNOME, or XWayland without
-  `MIT-SCREEN-SAVER`) quiet **starts at the desk** when the option is on:
-  Telegram stays silent, `/away` releases it, a timed `/away` hands the
-  default back when it expires and `/here` brings it back by hand. This only
-  happens in a graphical session (Wayland or X11); on a headless server
-  (a Linux server or SSH session without `DISPLAY`, `WAYLAND_DISPLAY` or
-  `XDG_SESSION_TYPE`) quiet stays off by default, so posts are never held
-  forever. The daemon logs one warning at start (`no input idle source`) and
-  retries once a minute, so a source that appears later takes over.
-  Definitive answers (`ServiceUnknown`, `NotSupported`, XWayland without
-  `MIT-SCREEN-SAVER`) count as "no source"; a genuinely transient failure (a
-  timeout, the session bus not up yet) keeps the previous verdict, logs one
+- **Where there is no source** (KDE Plasma on Wayland, where Mutter answers
+  `ServiceUnknown`, `sway` and other Wayland desktops besides GNOME, XWayland
+  without `MIT-SCREEN-SAVER`, or neither `gdbus` nor `xprintidle` installed)
+  presence is by hand. In a desktop session (`WAYLAND_DISPLAY`, a local
+  `DISPLAY` such as `:0`, or `XDG_SESSION_TYPE` `wayland` or `x11`) quiet
+  **starts at the desk** when the option is on: Telegram stays silent until
+  `/away`, a timed `/away` hands the default back the moment it expires, and
+  `/here` brings it back by hand. On a headless server (an SSH or console
+  login, X forwarding included) quiet stays off, so posts are never held with
+  nobody to lift it; `/here` still turns it on by hand. The daemon logs one
+  warning (`no input idle source`) and asks again once a minute, so a source
+  that appears later takes over from presence by hand. Only definitive
+  answers count as "no source" (`ServiceUnknown`, `NotSupported`,
+  `screen saver extension not supported`); any other failure (a timeout,
+  the session bus not up yet, a display that does not open) keeps the
+  previous verdict, which before the first good sample is "away", logs one
   `presence sample failed`, and `presence source recovered` follows the next
   good sample.
 - **While at the desk** (quiet on): the reconciler defers every topic write
@@ -852,12 +854,13 @@ you can see the plugin working. Tick `Quiet while at the desk` in
 - **`/away [2h]` and `/here`** in General: `/away` forces "away" until
   `/here`, `/away 2h` (any Go duration from `1m` to `168h`) for that long,
   then the automatic verdict rules again. On a machine without an input idle
-  source it releases the at-desk default so Telegram starts catching up, and
-  a timed `/away` hands the default back when it expires. `/here` brings it
-  back by hand (`🖥 quiet on until /away`) where no source exists, and rules
-  automatically again elsewhere. `/status` shows `🏃 away (manual) until
-  14:30`. Nothing is persisted: a daemon restart returns to automatic. In a
-  topic both commands answer `presence commands live in General`.
+  source `/away` releases presence by hand so Telegram starts catching up,
+  and when a timed `/away` expires a desktop session is back at the desk.
+  There `/here` turns quiet on by hand (`🖥 quiet on until /away`);
+  elsewhere it returns to the automatic verdict. `/status` shows `🏃 away
+  (manual) until 14:30`. Nothing is persisted: a daemon restart returns to
+  automatic. In a topic both commands answer `presence commands live in
+  General`.
 - **At start** presence is sampled before the first reconcile, so a daemon
   started while you are typing edits no icon; the catch-up follows when you
   leave. The `status` action line ends with `quiet=on|away|away-manual|off`

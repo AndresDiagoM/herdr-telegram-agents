@@ -13,7 +13,8 @@ func TestPresenceStateWord(t *testing.T) {
 	}{
 		{"disabled", PresenceState{Enabled: false, Supported: true, AtDesk: true}, "off"},
 		{"unsupported", PresenceState{Enabled: true, Supported: false, AtDesk: false}, "off"},
-		{"unsupported with manual away", PresenceState{Enabled: true, Supported: false, ManualAway: true}, "off"},
+		{"unsupported with manual away", PresenceState{Enabled: true, Supported: false, ManualAway: true}, "away-manual"},
+		{"unsupported by hand", PresenceState{Enabled: true, Supported: false, ManualHere: true, Quiet: true}, "on"},
 		{"quiet", PresenceState{Enabled: true, Supported: true, AtDesk: true, Quiet: true}, "on"},
 		{"away", PresenceState{Enabled: true, Supported: true, AtDesk: false}, "away"},
 		{"manual away", PresenceState{Enabled: true, Supported: true, AtDesk: true, ManualAway: true, Until: time.Unix(1, 0)}, "away-manual"},

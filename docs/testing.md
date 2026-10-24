@@ -323,7 +323,8 @@ desktop. Record the distribution, desktop, session type
 - [ ] **GNOME on Wayland**: tick `Quiet while at the desk`, `Away after` → `1m`; the log has `input idle source source=mutter`; typing keeps `status` at `quiet=on`; a minute without input turns it to `away` and the topics catch up
 - [ ] **X11 with `xprintidle`** (GNOME on Xorg, or another X11 desktop without gdbus on PATH): the same, with `source=mutter` on GNOME and `source=xprintidle` elsewhere
 - [ ] **Failure keeps the verdict**: while at the desk, make the source fail (rename `xprintidle` away on an X11 desktop without Mutter): one `presence sample failed, keeping the previous verdict` warning, `quiet=on` stays; restore it → `presence source recovered`
-- [ ] **No session**: start the daemon from an SSH login without `DISPLAY` and `WAYLAND_DISPLAY`: one `presence: no input idle source on this machine` warning, `/away` answers `quiet mode has no input idle source on this machine`
+- [ ] **KDE Plasma on Wayland** (no source): one `presence: no input idle source, starting at the desk until /away` warning, `status` at `quiet=on`, `/status` starts with `🖐 presence by hand: /away when you leave`; `/away 1m` catches up and a minute later `quiet=on` is back; `/here` after an open `/away` answers `🖥 quiet on until /away (no input idle source on this machine)`
+- [ ] **No session**: start the daemon from an SSH login without `DISPLAY` and `WAYLAND_DISPLAY`: one `presence: no input idle source and no desktop session, quiet stays off; /here turns it on by hand` warning, `status` at `quiet=off`; `/here` turns it on, `/away` off again
 
 ## Private sharing acceptance
 
